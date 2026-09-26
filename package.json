@@ -17,7 +17,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern='src/__tests__'",
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=src/__tests__",
     "dev": "tsc --watch",
     "pack:verify": "npm pack --dry-run"
   },
