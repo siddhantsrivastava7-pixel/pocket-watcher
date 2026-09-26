@@ -1,0 +1,27 @@
+{
+  "startingBudget": 0.5,
+  "totalSpent": 0.060302,
+  "reserves": {
+    "validation": 0.05,
+    "repair": 0.025,
+    "integration": 0.025
+  },
+  "features": [
+    {
+      "id": "hello",
+      "title": "Hello World feature",
+      "highEstimate": 0.15,
+      "spent": 0.060302,
+      "state": "done"
+    },
+    {
+      "id": "greet",
+      "title": "Greet feature",
+      "highEstimate": 0.15,
+      "spent": 0,
+      "state": "pending"
+    }
+  ],
+  "state": "BUILD",
+  "activeFeatureId": null
+}

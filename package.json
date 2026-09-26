@@ -1,0 +1,22 @@
+{
+  "name": "pocket-watcher",
+  "version": "0.1.0",
+  "description": "Budget-aware execution governor for coding agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "pocket": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern='src/__tests__'",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.7.2"
+  }
+}
