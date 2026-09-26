@@ -11,7 +11,10 @@ import type { Feature, ValidationCommandResult, ValidationResult, ProjectValidat
  * Run a single shell command and capture result.
  * Does not invoke Bob. Costs zero Bobcoins.
  *
- * @param command  The command string to run via sh -c
+ * On Windows, commands are executed via cmd.exe /d /s /c.
+ * On macOS/Linux, commands are executed via /bin/sh -c.
+ *
+ * @param command  The command string to run via the platform shell
  * @param cwd      Working directory (defaults to process.cwd())
  */
 export declare function runValidationCommand(command: string, cwd?: string): Promise<ValidationCommandResult>;

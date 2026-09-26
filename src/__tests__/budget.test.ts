@@ -298,7 +298,7 @@ describe("validateFeature — deterministic command runner", () => {
   });
 
   test("passing command returns passed=true", async () => {
-    const feature = makeFeature({ validation: { commands: ["true"] } });
+    const feature = makeFeature({ validation: { commands: ["node -e \"process.exit(0)\""] } });
     const result = await validateFeature(feature);
     expect(result).not.toBeNull();
     expect(result!.passed).toBe(true);
@@ -307,7 +307,7 @@ describe("validateFeature — deterministic command runner", () => {
   });
 
   test("failing command returns passed=false", async () => {
-    const feature = makeFeature({ validation: { commands: ["false"] } });
+    const feature = makeFeature({ validation: { commands: ["node -e \"process.exit(1)\""] } });
     const result = await validateFeature(feature);
     expect(result).not.toBeNull();
     expect(result!.passed).toBe(false);
@@ -317,7 +317,7 @@ describe("validateFeature — deterministic command runner", () => {
 
   test("stops after first failing command (fast-fail)", async () => {
     const feature = makeFeature({
-      validation: { commands: ["false", "echo should_not_run"] },
+      validation: { commands: ["node -e \"process.exit(1)\"", "node -e \"process.exit(0)\""] },
     });
     const result = await validateFeature(feature);
     expect(result).not.toBeNull();
@@ -327,7 +327,7 @@ describe("validateFeature — deterministic command runner", () => {
 
   test("all commands must pass for overall pass", async () => {
     const feature = makeFeature({
-      validation: { commands: ["true", "true", "true"] },
+      validation: { commands: ["node -e \"process.exit(0)\"", "node -e \"process.exit(0)\"", "node -e \"process.exit(0)\""] },
     });
     const result = await validateFeature(feature);
     expect(result!.passed).toBe(true);
@@ -335,27 +335,27 @@ describe("validateFeature — deterministic command runner", () => {
   });
 
   test("returns featureId in result", async () => {
-    const feature = makeFeature({ id: "F42", validation: { commands: ["true"] } });
+    const feature = makeFeature({ id: "F42", validation: { commands: ["node -e \"process.exit(0)\""] } });
     const result = await validateFeature(feature);
     expect(result!.featureId).toBe("F42");
   });
 
   test("captures stdout in result", async () => {
-    const feature = makeFeature({ validation: { commands: ["echo hello_world"] } });
+    const feature = makeFeature({ validation: { commands: ["node -e \"process.stdout.write('hello_world')\""] } });
     const result = await validateFeature(feature);
     expect(result!.commands[0].stdout).toContain("hello_world");
     expect(result!.commands[0].passed).toBe(true);
   });
 
   test("captures stderr in result", async () => {
-    const feature = makeFeature({ validation: { commands: ["sh -c 'echo error_msg >&2; false'"] } });
+    const feature = makeFeature({ validation: { commands: ["node -e \"process.stderr.write('error_msg'); process.exit(1)\""] } });
     const result = await validateFeature(feature);
     expect(result!.commands[0].stderr).toContain("error_msg");
     expect(result!.commands[0].passed).toBe(false);
   });
 
   test("durationMs is a non-negative number", async () => {
-    const feature = makeFeature({ validation: { commands: ["true"] } });
+    const feature = makeFeature({ validation: { commands: ["node -e \"process.exit(0)\""] } });
     const result = await validateFeature(feature);
     expect(result!.durationMs).toBeGreaterThanOrEqual(0);
   });
@@ -375,22 +375,22 @@ describe("validateProject — project-level validation", () => {
   });
 
   test("passing commands returns passed=true", async () => {
-    const result = await validateProject({ commands: ["true", "true"] });
+    const result = await validateProject({ commands: ["node -e \"process.exit(0)\"", "node -e \"process.exit(0)\""] });
     expect(result!.passed).toBe(true);
   });
 
   test("failing command returns passed=false", async () => {
-    const result = await validateProject({ commands: ["false"] });
+    const result = await validateProject({ commands: ["node -e \"process.exit(1)\""] });
     expect(result!.passed).toBe(false);
   });
 
   test("featureId is null for project check", async () => {
-    const result = await validateProject({ commands: ["true"] });
+    const result = await validateProject({ commands: ["node -e \"process.exit(0)\""] });
     expect(result!.featureId).toBeNull();
   });
 
   test("does not fabricate success when command fails", async () => {
-    const result = await validateProject({ commands: ["sh -c 'exit 42'"] });
+    const result = await validateProject({ commands: ["node -e \"process.exit(42)\""] });
     expect(result!.passed).toBe(false);
     expect(result!.commands[0].exitCode).toBe(42);
   });
