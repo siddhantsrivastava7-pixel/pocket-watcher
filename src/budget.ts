@@ -1,47 +1,94 @@
 /**
- * Pocket Watcher — budget engine
+ * Pocket Watcher — budget engine V1
  *
- * Pure functions. No I/O, no side-effects. Fully deterministic.
+ * Pure functions. No I/O. No side-effects. Fully deterministic.
+ *
+ * Compute budget is generic. For Bob V1 the unit is "bobcoin".
  */
 
 import type {
-  ProjectBudget,
+  ShipContract,
   Feature,
   Reserves,
   RiskState,
   ProjectState,
+  ComputeWindow,
+  Forecast,
+  PhaseAllocation,
+  BudgetMode,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
-// Derived values
+// Default configuration constants
 // ---------------------------------------------------------------------------
 
-/** Total protected reserve (sum of all three reserve buckets). */
+/** Default overshoot guard subtracted from featureWallet before --max-cost. */
+export const DEFAULT_OVERSHOOT_GUARD = 0.01;
+
+/** Planning cap as a fraction of flexible spendable budget. */
+export const PLANNING_BUDGET_FRACTION = 0.05;
+
+/** Maximum planning budget regardless of window size. */
+export const PLANNING_BUDGET_MAX = 1.0;
+
+/** Default reserve floors. */
+export const DEFAULT_RESERVES: Reserves = {
+  validation: 0.5,
+  repair: 0.25,
+  integration: 0.25,
+};
+
+// ---------------------------------------------------------------------------
+// Compute-window helpers
+// ---------------------------------------------------------------------------
+
+/** Sum of all protected reserve floors. */
 export function totalReserve(reserves: Reserves): number {
   return reserves.validation + reserves.repair + reserves.integration;
 }
 
-/** Remaining budget (starting - total spent). */
-export function remainingBudget(budget: ProjectBudget): number {
-  return budget.startingBudget - budget.totalSpent;
+/** Remaining assigned budget for the current window. */
+export function windowRemaining(w: ComputeWindow): number {
+  return w.assignedBudget - w.actualSpent;
 }
 
 /**
- * Spendable budget — what Bob is actually allowed to touch.
- * spendable = remaining - protected reserves
- * Clamped to 0 (never negative).
+ * Flexible spendable budget — remaining minus protected reserves.
+ * Clamped to 0.
  */
-export function spendableBudget(budget: ProjectBudget): number {
-  return Math.max(0, remainingBudget(budget) - totalReserve(budget.reserves));
+export function spendableBudget(contract: ShipContract): number {
+  const rem = windowRemaining(contract.currentWindow);
+  return Math.max(0, rem - totalReserve(contract.reserves));
 }
 
+// ---------------------------------------------------------------------------
+// Forecast
+// ---------------------------------------------------------------------------
+
 /**
- * Sum of highEstimates for all features not yet done/skipped.
+ * Sum of high estimates for features that are not done/deferred.
+ * Only counts "must" priority by default; includes all non-done features.
  */
-export function forecastRemaining(budget: ProjectBudget): number {
-  return budget.features
-    .filter((f) => f.state === "pending" || f.state === "running")
-    .reduce((sum, f) => sum + f.highEstimate, 0);
+export function forecastHighRemaining(contract: ShipContract): number {
+  return contract.features
+    .filter(
+      (f) =>
+        f.status === "pending" ||
+        f.status === "running" ||
+        f.status === "budget_interrupted"
+    )
+    .reduce((sum, f) => sum + f.estimate.high, 0);
+}
+
+export function forecastLowRemaining(contract: ShipContract): number {
+  return contract.features
+    .filter(
+      (f) =>
+        f.status === "pending" ||
+        f.status === "running" ||
+        f.status === "budget_interrupted"
+    )
+    .reduce((sum, f) => sum + f.estimate.low, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -49,20 +96,29 @@ export function forecastRemaining(budget: ProjectBudget): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute risk state for the current project.
+ * Compute risk state.
  *
- * SAFE   — forecast < 80% of spendable
+ * SAFE   — high forecast < 80% of spendable
  * TIGHT  — 80% ≤ forecast ≤ 100% of spendable
  * UNSAFE — forecast > 100% of spendable
  */
-export function computeRiskState(budget: ProjectBudget): RiskState {
-  const spendable = spendableBudget(budget);
+export function computeRiskState(contract: ShipContract): RiskState {
+  const spendable = spendableBudget(contract);
   if (spendable <= 0) return "UNSAFE";
-  const forecast = forecastRemaining(budget);
+  const forecast = forecastHighRemaining(contract);
   const ratio = forecast / spendable;
   if (ratio > 1.0) return "UNSAFE";
   if (ratio >= 0.8) return "TIGHT";
   return "SAFE";
+}
+
+/** Build a fresh Forecast object from the current contract. */
+export function buildForecast(contract: ShipContract): Forecast {
+  return {
+    remainingHighBC: forecastHighRemaining(contract),
+    remainingLowBC: forecastLowRemaining(contract),
+    riskState: computeRiskState(contract),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -70,84 +126,331 @@ export function computeRiskState(budget: ProjectBudget): RiskState {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute the maximum Bobcoins to pass to `bob run --max-cost` for a feature.
+ * Calculate the amount to pass to `bob run --max-cost`.
  *
- * We never expose the full remaining budget to Bob.
- * The wallet is capped at spendable, and further capped at the feature's own
- * highEstimate to avoid Bob spending more than we modelled for this feature.
+ * featureWallet = min(feature.estimate.high, spendable)
+ * bobMaxCost    = featureWallet - overshootGuard
+ *
+ * Never returns <= 0. Returns null if the safe wallet is too small.
  */
 export function featureWallet(
-  budget: ProjectBudget,
+  contract: ShipContract,
   feature: Feature
 ): number {
-  const spendable = spendableBudget(budget);
-  return Math.min(spendable, feature.highEstimate);
+  const spendable = spendableBudget(contract);
+  return Math.min(spendable, feature.estimate.high);
+}
+
+export function bobMaxCost(
+  contract: ShipContract,
+  feature: Feature
+): number | null {
+  const wallet = featureWallet(contract, feature);
+  const safe = wallet - contract.overshootGuard;
+  if (safe <= 0) return null;
+  return safe;
+}
+
+// ---------------------------------------------------------------------------
+// Planning wallet
+// ---------------------------------------------------------------------------
+
+export function planningWallet(contract: ShipContract): number {
+  const spendable = spendableBudget(contract);
+  const pct = PLANNING_BUDGET_FRACTION * spendable;
+  return Math.min(pct, PLANNING_BUDGET_MAX);
+}
+
+// ---------------------------------------------------------------------------
+// Budget acquisition helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine assigned budget given provider remaining and optional user cap.
+ *
+ * Rules:
+ * - If userBudget is null: use providerRemaining (auto mode)
+ * - If userBudget <= providerRemaining: use userBudget (custom mode)
+ * - If userBudget >  providerRemaining: clamp to providerRemaining
+ *
+ * Returns { assignedBudget, budgetMode, capped }
+ */
+export function resolveAssignedBudget(
+  providerRemaining: number | null,
+  userBudget: number | null
+): {
+  assignedBudget: number;
+  budgetMode: BudgetMode;
+  capped: boolean;
+  providerRemainingAtStart: number | null;
+} {
+  if (userBudget === null) {
+    // auto mode
+    if (providerRemaining === null) {
+      throw new Error("providerRemaining is required for auto mode");
+    }
+    return {
+      assignedBudget: providerRemaining,
+      budgetMode: "auto",
+      capped: false,
+      providerRemainingAtStart: providerRemaining,
+    };
+  }
+
+  if (providerRemaining === null) {
+    // user budget, no provider info — trust user budget directly
+    return {
+      assignedBudget: userBudget,
+      budgetMode: "custom",
+      capped: false,
+      providerRemainingAtStart: null,
+    };
+  }
+
+  // custom: cap at provider remaining
+  const capped = userBudget > providerRemaining;
+  return {
+    assignedBudget: Math.min(userBudget, providerRemaining),
+    budgetMode: "custom",
+    capped,
+    providerRemainingAtStart: providerRemaining,
+  };
+}
+
+/**
+ * Build the initial phase allocation given an assigned budget.
+ * These are starting estimates only — not permanent buckets.
+ */
+export function buildInitialPhaseAllocation(
+  assignedBudget: number,
+  reserves: Reserves
+): PhaseAllocation {
+  const flexTotal = Math.max(0, assignedBudget - totalReserve(reserves));
+  return {
+    planning: Math.min(PLANNING_BUDGET_MAX, PLANNING_BUDGET_FRACTION * flexTotal),
+    implementation: flexTotal * 0.7,
+    integration: reserves.integration,
+    validation: reserves.validation,
+    repairLanding: reserves.repair,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// canStartFeature
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if a feature has a safe execution wallet.
+ * bobMaxCost must be > 0 after subtracting overshoot guard.
+ */
+export function canStartFeature(
+  contract: ShipContract,
+  feature: Feature
+): boolean {
+  const maxCost = bobMaxCost(contract, feature);
+  return maxCost !== null && maxCost > 0;
 }
 
 // ---------------------------------------------------------------------------
 // State transitions
 // ---------------------------------------------------------------------------
 
-/**
- * Return the next project state after a feature run.
- *
- * Rules:
- * - If UNSAFE → COMPRESS (unless no more pending features → LAND)
- * - If remaining pending features exist → stay in BUILD
- * - If no more pending features → LAND
- */
 export function nextProjectState(
-  budget: ProjectBudget,
-  riskAfterRun: RiskState
+  contract: ShipContract,
+  risk: RiskState
 ): ProjectState {
-  const hasPending = budget.features.some((f) => f.state === "pending");
-
-  if (riskAfterRun === "UNSAFE") {
+  const hasPending = contract.features.some(
+    (f) => f.status === "pending" || f.status === "budget_interrupted"
+  );
+  if (risk === "UNSAFE") {
     return hasPending ? "COMPRESS" : "LAND";
   }
   return hasPending ? "BUILD" : "LAND";
 }
 
+// ---------------------------------------------------------------------------
+// Record spend + reforecast (after a Bob run)
+// ---------------------------------------------------------------------------
+
 /**
- * Record actual spend for a completed feature run and return an updated budget.
- * Does NOT mutate the input.
+ * Record actual spend for a run and return an updated contract.
+ * Does NOT mutate input.
+ *
+ * @param featureId   Feature that was run (null for planning/integration phases)
+ * @param actualSpend Real session_costs from Bob
+ * @param interrupted True if cost-limit event was detected
  */
-export function recordFeatureSpend(
-  budget: ProjectBudget,
-  featureId: string,
-  actualSpend: number
-): ProjectBudget {
-  const features = budget.features.map((f) =>
-    f.id === featureId
-      ? { ...f, spent: f.spent + actualSpend, state: "done" as const }
-      : f
-  );
-  const updated: ProjectBudget = {
-    ...budget,
-    totalSpent: budget.totalSpent + actualSpend,
-    features,
-    activeFeatureId: null,
+export function recordSpend(
+  contract: ShipContract,
+  featureId: string | null,
+  actualSpend: number,
+  interrupted: boolean
+): ShipContract {
+  // Update window spend
+  const updatedWindow: ComputeWindow = {
+    ...contract.currentWindow,
+    actualSpent: contract.currentWindow.actualSpent + actualSpend,
+    remainingAssignedBudget:
+      contract.currentWindow.remainingAssignedBudget - actualSpend,
   };
-  const risk = computeRiskState(updated);
+
+  // Update feature
+  let updatedFeatures = contract.features;
+  if (featureId !== null) {
+    updatedFeatures = contract.features.map((f) => {
+      if (f.id !== featureId) return f;
+      return {
+        ...f,
+        actualSpent: f.actualSpent + actualSpend,
+        status: interrupted
+          ? ("budget_interrupted" as const)
+          : ("done" as const),
+      };
+    });
+  }
+
+  const partialContract: ShipContract = {
+    ...contract,
+    currentWindow: updatedWindow,
+    features: updatedFeatures,
+    activeFeatureId: null,
+    updatedAt: new Date().toISOString(),
+  };
+
+  // Reforecast and risk
+  const forecast = buildForecast(partialContract);
+  const risk = forecast.riskState;
+  const state = nextProjectState(partialContract, risk);
+
   return {
-    ...updated,
-    state: nextProjectState(updated, risk),
+    ...partialContract,
+    forecast,
+    state,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Guard: can we start a feature?
+// Burn-factor reforecast
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true if the feature's highEstimate fits within spendable budget
- * without consuming the protected reserve.
+ * If a feature overran its high estimate, apply a burn factor to all
+ * remaining unfinished features of the same priority tier.
  *
- * If false, caller must transition to COMPRESS or LAND instead.
+ * burnFactor = actualSpend / highEstimate  (only when > 1.0)
+ *
+ * V1 implementation: simple deterministic adjustment.
+ * Does NOT mutate input.
  */
-export function canStartFeature(
-  budget: ProjectBudget,
-  feature: Feature
-): boolean {
-  return feature.highEstimate <= spendableBudget(budget);
+export function applyBurnFactorReforecast(
+  contract: ShipContract,
+  completedFeatureId: string,
+  actualSpend: number
+): ShipContract {
+  const completed = contract.features.find((f) => f.id === completedFeatureId);
+  if (!completed) return contract;
+
+  const burnFactor = actualSpend / completed.estimate.high;
+  if (burnFactor <= 1.0) return contract; // underrun — no adjustment needed
+
+  const updatedFeatures = contract.features.map((f) => {
+    if (f.id === completedFeatureId) return f;
+    if (f.status !== "pending") return f;
+    return {
+      ...f,
+      estimate: {
+        ...f.estimate,
+        high: f.estimate.high * burnFactor,
+        low: f.estimate.low * burnFactor,
+      },
+    };
+  });
+
+  const partialContract = { ...contract, features: updatedFeatures };
+  const forecast = buildForecast(partialContract);
+  return {
+    ...partialContract,
+    forecast,
+    state: nextProjectState(partialContract, forecast.riskState),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Defer a feature
+// ---------------------------------------------------------------------------
+
+export function deferFeature(
+  contract: ShipContract,
+  featureId: string
+): ShipContract {
+  const updatedFeatures = contract.features.map((f) =>
+    f.id === featureId ? { ...f, status: "deferred" as const } : f
+  );
+  const deferredIds = contract.deferredFeatureIds.includes(featureId)
+    ? contract.deferredFeatureIds
+    : [...contract.deferredFeatureIds, featureId];
+
+  const partialContract: ShipContract = {
+    ...contract,
+    features: updatedFeatures,
+    deferredFeatureIds: deferredIds,
+    updatedAt: new Date().toISOString(),
+  };
+  const forecast = buildForecast(partialContract);
+  return {
+    ...partialContract,
+    forecast,
+    state: nextProjectState(partialContract, forecast.riskState),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Create a new compute window (for pocket resume)
+// ---------------------------------------------------------------------------
+
+export function openNewWindow(
+  contract: ShipContract,
+  assignedBudget: number,
+  providerRemainingAtStart: number | null,
+  budgetMode: BudgetMode
+): ShipContract {
+  const closedWindow: ComputeWindow = {
+    ...contract.currentWindow,
+    closedAt: new Date().toISOString(),
+  };
+
+  const newWindow: ComputeWindow = {
+    windowId: contract.currentWindow.windowId + 1,
+    provider: "bob",
+    unit: "bobcoin",
+    budgetMode,
+    providerRemainingAtStart,
+    assignedBudget,
+    actualSpent: 0,
+    remainingAssignedBudget: assignedBudget,
+    createdAt: new Date().toISOString(),
+    closedAt: null,
+  };
+
+  // Reset interrupted features back to pending for the new window
+  const updatedFeatures = contract.features.map((f) =>
+    f.status === "budget_interrupted"
+      ? { ...f, status: "pending" as const, windowId: newWindow.windowId }
+      : f
+  );
+
+  const partialContract: ShipContract = {
+    ...contract,
+    currentWindow: newWindow,
+    previousWindows: [...contract.previousWindows, closedWindow],
+    features: updatedFeatures,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const forecast = buildForecast(partialContract);
+  return {
+    ...partialContract,
+    forecast,
+    state: "BUILD",
+  };
 }

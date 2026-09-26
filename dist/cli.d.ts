@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 /**
- * Pocket Watcher CLI
+ * Pocket Watcher CLI — V1
  *
  * Commands:
- *   pocket status              — show project budget & risk
- *   pocket run <feature-id>    — run a feature within its wallet
+ *   pocket init [--budget <n>]
+ *   pocket scope "<request>"
+ *   pocket status
+ *   pocket run <feature-id>
+ *   pocket defer <feature-id>
+ *   pocket land
+ *   pocket resume [--budget <n>]
  */
 export {};

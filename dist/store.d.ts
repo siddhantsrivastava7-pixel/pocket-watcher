@@ -1,9 +1,14 @@
 /**
- * Pocket Watcher — project file I/O
+ * Pocket Watcher — project file I/O V1
  *
- * Reads/writes pocket.json in the current working directory.
+ * Contract files:
+ *   .pocket/ship-contract.json   — current project state
+ *   .pocket/history.jsonl        — append-only spend history
  */
-import type { ProjectBudget } from "./types.js";
-export declare function budgetPath(cwd?: string): string;
-export declare function loadBudget(cwd?: string): Promise<ProjectBudget>;
-export declare function saveBudget(budget: ProjectBudget, cwd?: string): Promise<void>;
+import type { ShipContract, HistoryEntry } from "./types.js";
+export declare function pocketDir(cwd?: string): string;
+export declare function contractPath(cwd?: string): string;
+export declare function historyPath(cwd?: string): string;
+export declare function loadContract(cwd?: string): Promise<ShipContract>;
+export declare function saveContract(contract: ShipContract, cwd?: string): Promise<void>;
+export declare function appendHistory(entry: HistoryEntry, cwd?: string): Promise<void>;

@@ -1,34 +1,74 @@
 /**
- * Pocket Watcher — project file I/O
+ * Pocket Watcher — project file I/O V1
  *
- * Reads/writes pocket.json in the current working directory.
+ * Contract files:
+ *   .pocket/ship-contract.json   — current project state
+ *   .pocket/history.jsonl        — append-only spend history
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import {
+  readFile,
+  writeFile,
+  mkdir,
+  appendFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { ProjectBudget } from "./types.js";
+import type { ShipContract, HistoryEntry } from "./types.js";
 
-const BUDGET_FILE = "pocket.json";
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
 
-export function budgetPath(cwd = process.cwd()): string {
-  return join(cwd, BUDGET_FILE);
+export function pocketDir(cwd = process.cwd()): string {
+  return join(cwd, ".pocket");
 }
 
-export async function loadBudget(cwd = process.cwd()): Promise<ProjectBudget> {
-  const path = budgetPath(cwd);
+export function contractPath(cwd = process.cwd()): string {
+  return join(pocketDir(cwd), "ship-contract.json");
+}
+
+export function historyPath(cwd = process.cwd()): string {
+  return join(pocketDir(cwd), "history.jsonl");
+}
+
+// ---------------------------------------------------------------------------
+// Contract I/O
+// ---------------------------------------------------------------------------
+
+export async function loadContract(cwd = process.cwd()): Promise<ShipContract> {
+  const path = contractPath(cwd);
   if (!existsSync(path)) {
     throw new Error(
-      `No pocket.json found in ${cwd}. Run \`pocket init\` first.`
+      `No .pocket/ship-contract.json found in ${cwd}. Run \`pocket init\` first.`
     );
   }
   const raw = await readFile(path, "utf-8");
-  return JSON.parse(raw) as ProjectBudget;
+  return JSON.parse(raw) as ShipContract;
 }
 
-export async function saveBudget(
-  budget: ProjectBudget,
+export async function saveContract(
+  contract: ShipContract,
   cwd = process.cwd()
 ): Promise<void> {
-  await writeFile(budgetPath(cwd), JSON.stringify(budget, null, 2) + "\n");
+  const dir = pocketDir(cwd);
+  if (!existsSync(dir)) {
+    await mkdir(dir, { recursive: true });
+  }
+  await writeFile(contractPath(cwd), JSON.stringify(contract, null, 2) + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// History I/O
+// ---------------------------------------------------------------------------
+
+export async function appendHistory(
+  entry: HistoryEntry,
+  cwd = process.cwd()
+): Promise<void> {
+  const dir = pocketDir(cwd);
+  if (!existsSync(dir)) {
+    await mkdir(dir, { recursive: true });
+  }
+  await appendFile(historyPath(cwd), JSON.stringify(entry) + "\n");
 }

@@ -1,57 +1,100 @@
 /**
- * Pocket Watcher — budget engine
+ * Pocket Watcher — budget engine V1
  *
- * Pure functions. No I/O, no side-effects. Fully deterministic.
+ * Pure functions. No I/O. No side-effects. Fully deterministic.
+ *
+ * Compute budget is generic. For Bob V1 the unit is "bobcoin".
  */
-import type { ProjectBudget, Feature, Reserves, RiskState, ProjectState } from "./types.js";
-/** Total protected reserve (sum of all three reserve buckets). */
+import type { ShipContract, Feature, Reserves, RiskState, ProjectState, ComputeWindow, Forecast, PhaseAllocation, BudgetMode } from "./types.js";
+/** Default overshoot guard subtracted from featureWallet before --max-cost. */
+export declare const DEFAULT_OVERSHOOT_GUARD = 0.01;
+/** Planning cap as a fraction of flexible spendable budget. */
+export declare const PLANNING_BUDGET_FRACTION = 0.05;
+/** Maximum planning budget regardless of window size. */
+export declare const PLANNING_BUDGET_MAX = 1;
+/** Default reserve floors. */
+export declare const DEFAULT_RESERVES: Reserves;
+/** Sum of all protected reserve floors. */
 export declare function totalReserve(reserves: Reserves): number;
-/** Remaining budget (starting - total spent). */
-export declare function remainingBudget(budget: ProjectBudget): number;
+/** Remaining assigned budget for the current window. */
+export declare function windowRemaining(w: ComputeWindow): number;
 /**
- * Spendable budget — what Bob is actually allowed to touch.
- * spendable = remaining - protected reserves
- * Clamped to 0 (never negative).
+ * Flexible spendable budget — remaining minus protected reserves.
+ * Clamped to 0.
  */
-export declare function spendableBudget(budget: ProjectBudget): number;
+export declare function spendableBudget(contract: ShipContract): number;
 /**
- * Sum of highEstimates for all features not yet done/skipped.
+ * Sum of high estimates for features that are not done/deferred.
+ * Only counts "must" priority by default; includes all non-done features.
  */
-export declare function forecastRemaining(budget: ProjectBudget): number;
+export declare function forecastHighRemaining(contract: ShipContract): number;
+export declare function forecastLowRemaining(contract: ShipContract): number;
 /**
- * Compute risk state for the current project.
+ * Compute risk state.
  *
- * SAFE   — forecast < 80% of spendable
+ * SAFE   — high forecast < 80% of spendable
  * TIGHT  — 80% ≤ forecast ≤ 100% of spendable
  * UNSAFE — forecast > 100% of spendable
  */
-export declare function computeRiskState(budget: ProjectBudget): RiskState;
+export declare function computeRiskState(contract: ShipContract): RiskState;
+/** Build a fresh Forecast object from the current contract. */
+export declare function buildForecast(contract: ShipContract): Forecast;
 /**
- * Compute the maximum Bobcoins to pass to `bob run --max-cost` for a feature.
+ * Calculate the amount to pass to `bob run --max-cost`.
  *
- * We never expose the full remaining budget to Bob.
- * The wallet is capped at spendable, and further capped at the feature's own
- * highEstimate to avoid Bob spending more than we modelled for this feature.
+ * featureWallet = min(feature.estimate.high, spendable)
+ * bobMaxCost    = featureWallet - overshootGuard
+ *
+ * Never returns <= 0. Returns null if the safe wallet is too small.
  */
-export declare function featureWallet(budget: ProjectBudget, feature: Feature): number;
+export declare function featureWallet(contract: ShipContract, feature: Feature): number;
+export declare function bobMaxCost(contract: ShipContract, feature: Feature): number | null;
+export declare function planningWallet(contract: ShipContract): number;
 /**
- * Return the next project state after a feature run.
+ * Determine assigned budget given provider remaining and optional user cap.
  *
  * Rules:
- * - If UNSAFE → COMPRESS (unless no more pending features → LAND)
- * - If remaining pending features exist → stay in BUILD
- * - If no more pending features → LAND
- */
-export declare function nextProjectState(budget: ProjectBudget, riskAfterRun: RiskState): ProjectState;
-/**
- * Record actual spend for a completed feature run and return an updated budget.
- * Does NOT mutate the input.
- */
-export declare function recordFeatureSpend(budget: ProjectBudget, featureId: string, actualSpend: number): ProjectBudget;
-/**
- * Returns true if the feature's highEstimate fits within spendable budget
- * without consuming the protected reserve.
+ * - If userBudget is null: use providerRemaining (auto mode)
+ * - If userBudget <= providerRemaining: use userBudget (custom mode)
+ * - If userBudget >  providerRemaining: clamp to providerRemaining
  *
- * If false, caller must transition to COMPRESS or LAND instead.
+ * Returns { assignedBudget, budgetMode, capped }
  */
-export declare function canStartFeature(budget: ProjectBudget, feature: Feature): boolean;
+export declare function resolveAssignedBudget(providerRemaining: number | null, userBudget: number | null): {
+    assignedBudget: number;
+    budgetMode: BudgetMode;
+    capped: boolean;
+    providerRemainingAtStart: number | null;
+};
+/**
+ * Build the initial phase allocation given an assigned budget.
+ * These are starting estimates only — not permanent buckets.
+ */
+export declare function buildInitialPhaseAllocation(assignedBudget: number, reserves: Reserves): PhaseAllocation;
+/**
+ * Returns true if a feature has a safe execution wallet.
+ * bobMaxCost must be > 0 after subtracting overshoot guard.
+ */
+export declare function canStartFeature(contract: ShipContract, feature: Feature): boolean;
+export declare function nextProjectState(contract: ShipContract, risk: RiskState): ProjectState;
+/**
+ * Record actual spend for a run and return an updated contract.
+ * Does NOT mutate input.
+ *
+ * @param featureId   Feature that was run (null for planning/integration phases)
+ * @param actualSpend Real session_costs from Bob
+ * @param interrupted True if cost-limit event was detected
+ */
+export declare function recordSpend(contract: ShipContract, featureId: string | null, actualSpend: number, interrupted: boolean): ShipContract;
+/**
+ * If a feature overran its high estimate, apply a burn factor to all
+ * remaining unfinished features of the same priority tier.
+ *
+ * burnFactor = actualSpend / highEstimate  (only when > 1.0)
+ *
+ * V1 implementation: simple deterministic adjustment.
+ * Does NOT mutate input.
+ */
+export declare function applyBurnFactorReforecast(contract: ShipContract, completedFeatureId: string, actualSpend: number): ShipContract;
+export declare function deferFeature(contract: ShipContract, featureId: string): ShipContract;
+export declare function openNewWindow(contract: ShipContract, assignedBudget: number, providerRemainingAtStart: number | null, budgetMode: BudgetMode): ShipContract;
