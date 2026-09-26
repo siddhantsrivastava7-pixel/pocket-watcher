@@ -49,12 +49,45 @@ export interface PhaseAllocation {
     validation: number;
     repairLanding: number;
 }
+/** Per-feature validation configuration. */
+export interface ValidationConfig {
+    /** Commands to run deterministically. Zero Bob cost. */
+    commands: string[];
+}
+/** Result of running one validation command. */
+export interface ValidationCommandResult {
+    command: string;
+    exitCode: number;
+    durationMs: number;
+    stdout: string;
+    stderr: string;
+    passed: boolean;
+}
+/** Aggregated result of running all validation commands for a feature. */
+export interface ValidationResult {
+    featureId: string | null;
+    commands: ValidationCommandResult[];
+    passed: boolean;
+    durationMs: number;
+}
 export interface FeatureEstimate {
     low: number;
     high: number;
     /** "low" | "medium" | "high" */
     confidence: string;
 }
+/**
+ * Feature status lifecycle.
+ *
+ * pending              — not yet run
+ * running              — currently executing
+ * done                 — completed + deterministic validation passed
+ * deferred             — explicitly deferred by user (COMPRESS)
+ * budget_interrupted   — Bob run stopped by cost limit
+ * awaiting_validation  — Bob completed normally, no deterministic validation configured
+ * validation_failed    — deterministic validation ran and one or more commands failed
+ */
+export type FeatureStatus = "pending" | "running" | "done" | "deferred" | "budget_interrupted" | "awaiting_validation" | "validation_failed";
 /** One candidate feature / task produced during scope. */
 export interface Feature {
     id: string;
@@ -66,7 +99,9 @@ export interface Feature {
     estimate: FeatureEstimate;
     acceptance: string[];
     excluded: string[];
-    status: "pending" | "running" | "done" | "deferred" | "budget_interrupted";
+    status: FeatureStatus;
+    /** Deterministic validation configuration (optional). */
+    validation?: ValidationConfig;
     /** Actual compute consumed (0 until run). */
     actualSpent: number;
     /** Window in which this feature was last active. */
@@ -78,6 +113,10 @@ export interface Forecast {
     /** Sum of low estimates for unfinished must features. */
     remainingLowBC: number;
     riskState: RiskState;
+}
+/** Optional project-level finishing checks (e.g. build, typecheck, tests). */
+export interface ProjectValidationConfig {
+    commands: string[];
 }
 export interface ShipContract {
     projectId: string;
@@ -94,6 +133,7 @@ export interface ShipContract {
     activeFeatureId: string | null;
     forecast: Forecast;
     state: ProjectState;
+    projectValidation?: ProjectValidationConfig;
 }
 export interface HistoryEntry {
     windowId: number;
@@ -114,6 +154,40 @@ export interface HistoryEntry {
     stateBefore: ProjectState;
     stateAfter: ProjectState;
     note: string;
+}
+/** History entry for a deterministic validation event. */
+export interface ValidationHistoryEntry {
+    event: "validation";
+    timestamp: string;
+    featureId: string | null;
+    commands: ValidationCommandResult[];
+    passed: boolean;
+    durationMs: number;
+}
+/** History entry for a repair run. */
+export interface RepairHistoryEntry {
+    event: "repair";
+    timestamp: string;
+    windowId: number;
+    featureId: string;
+    assignedRepairWallet: number;
+    bobMaxCost: number;
+    realSessionCosts: number;
+    durationMs: number | null;
+    toolCalls: number | null;
+    bobTaskId: string | null;
+    costLimitHit: boolean;
+    validationPassed: boolean | null;
+    finalFeatureStatus: FeatureStatus;
+    note: string;
+}
+/** History entry for a project-level check. */
+export interface ProjectCheckHistoryEntry {
+    event: "project_check";
+    timestamp: string;
+    commands: ValidationCommandResult[];
+    passed: boolean;
+    durationMs: number;
 }
 /** The JSON result line emitted by `bob run --format json`. */
 export interface BobResultLine {

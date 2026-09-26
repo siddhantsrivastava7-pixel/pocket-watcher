@@ -41,11 +41,23 @@ export async function saveContract(contract, cwd = process.cwd()) {
 // ---------------------------------------------------------------------------
 // History I/O
 // ---------------------------------------------------------------------------
-export async function appendHistory(entry, cwd = process.cwd()) {
+async function appendHistoryLine(line, cwd = process.cwd()) {
     const dir = pocketDir(cwd);
     if (!existsSync(dir)) {
         await mkdir(dir, { recursive: true });
     }
-    await appendFile(historyPath(cwd), JSON.stringify(entry) + "\n");
+    await appendFile(historyPath(cwd), JSON.stringify(line) + "\n");
+}
+export async function appendHistory(entry, cwd = process.cwd()) {
+    await appendHistoryLine(entry, cwd);
+}
+export async function appendValidationHistory(entry, cwd = process.cwd()) {
+    await appendHistoryLine(entry, cwd);
+}
+export async function appendRepairHistory(entry, cwd = process.cwd()) {
+    await appendHistoryLine(entry, cwd);
+}
+export async function appendProjectCheckHistory(entry, cwd = process.cwd()) {
+    await appendHistoryLine(entry, cwd);
 }
 //# sourceMappingURL=store.js.map

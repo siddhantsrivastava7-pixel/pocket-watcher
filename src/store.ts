@@ -14,7 +14,13 @@ import {
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { ShipContract, HistoryEntry } from "./types.js";
+import type {
+  ShipContract,
+  HistoryEntry,
+  ValidationHistoryEntry,
+  RepairHistoryEntry,
+  ProjectCheckHistoryEntry,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -62,13 +68,41 @@ export async function saveContract(
 // History I/O
 // ---------------------------------------------------------------------------
 
-export async function appendHistory(
-  entry: HistoryEntry,
+async function appendHistoryLine(
+  line: unknown,
   cwd = process.cwd()
 ): Promise<void> {
   const dir = pocketDir(cwd);
   if (!existsSync(dir)) {
     await mkdir(dir, { recursive: true });
   }
-  await appendFile(historyPath(cwd), JSON.stringify(entry) + "\n");
+  await appendFile(historyPath(cwd), JSON.stringify(line) + "\n");
+}
+
+export async function appendHistory(
+  entry: HistoryEntry,
+  cwd = process.cwd()
+): Promise<void> {
+  await appendHistoryLine(entry, cwd);
+}
+
+export async function appendValidationHistory(
+  entry: ValidationHistoryEntry,
+  cwd = process.cwd()
+): Promise<void> {
+  await appendHistoryLine(entry, cwd);
+}
+
+export async function appendRepairHistory(
+  entry: RepairHistoryEntry,
+  cwd = process.cwd()
+): Promise<void> {
+  await appendHistoryLine(entry, cwd);
+}
+
+export async function appendProjectCheckHistory(
+  entry: ProjectCheckHistoryEntry,
+  cwd = process.cwd()
+): Promise<void> {
+  await appendHistoryLine(entry, cwd);
 }

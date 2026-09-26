@@ -11,7 +11,7 @@
  * - stdin MUST be closed (stdio: ['ignore', ...]) or bob hangs forever.
  * - BOB_API_KEY must be set in the environment.
  */
-import type { RunResult, Feature } from "./types.js";
+import type { RunResult, Feature, ValidationCommandResult } from "./types.js";
 export { RunResult };
 /**
  * Build a narrow execution prompt for a single feature.
@@ -20,6 +20,13 @@ export { RunResult };
  * It explicitly lists excluded work and deferred features to prevent scope drift.
  */
 export declare function buildFeaturePrompt(feature: Feature, deferredFeatureIds: string[]): string;
+/**
+ * Build a narrow repair prompt for a feature.
+ *
+ * Contains only what is required to repair this feature.
+ * Explicitly excludes all other work to prevent scope drift.
+ */
+export declare function buildRepairPrompt(feature: Feature, failedCommands: ValidationCommandResult[], deferredFeatureIds: string[]): string;
 /**
  * Run a Bob task with a hard cost ceiling.
  *

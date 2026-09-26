@@ -18,6 +18,7 @@ import type {
   BobResultLine,
   RunResult,
   Feature,
+  ValidationCommandResult,
 } from "./types.js";
 
 export { RunResult };
@@ -67,6 +68,72 @@ export function buildFeaturePrompt(
     `Do not future-proof unrelated architecture.`,
     `Do not add optional functionality not listed in acceptance criteria.`,
     `Stop once the acceptance criteria are satisfied and required validation passes.`
+  );
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Repair prompt builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a narrow repair prompt for a feature.
+ *
+ * Contains only what is required to repair this feature.
+ * Explicitly excludes all other work to prevent scope drift.
+ */
+export function buildRepairPrompt(
+  feature: Feature,
+  failedCommands: ValidationCommandResult[],
+  deferredFeatureIds: string[]
+): string {
+  const lines: string[] = [
+    `REPAIR CONTRACT`,
+    `===============`,
+    `ID:   ${feature.id}`,
+    `Name: ${feature.name}`,
+    `Goal: ${feature.goal}`,
+    ``,
+    `Acceptance criteria:`,
+    ...feature.acceptance.map((a) => `  - ${a}`),
+  ];
+
+  if (feature.excluded.length > 0) {
+    lines.push(``, `Explicitly excluded from this task:`);
+    lines.push(...feature.excluded.map((e) => `  - ${e}`));
+  }
+
+  if (failedCommands.length > 0) {
+    lines.push(``, `Failed validation commands:`);
+    for (const cmd of failedCommands) {
+      lines.push(`  Command : ${cmd.command}`);
+      lines.push(`  Exit    : ${cmd.exitCode}`);
+      if (cmd.stderr.trim()) {
+        lines.push(`  Stderr  : ${cmd.stderr.trim().slice(0, 300)}`);
+      }
+      if (cmd.stdout.trim()) {
+        lines.push(`  Stdout  : ${cmd.stdout.trim().slice(0, 300)}`);
+      }
+    }
+  }
+
+  if (deferredFeatureIds.length > 0) {
+    lines.push(``, `Deferred — do not implement these:`);
+    lines.push(...deferredFeatureIds.map((id) => `  - ${id}`));
+  }
+
+  lines.push(
+    ``,
+    `REPAIR INSTRUCTIONS`,
+    `===================`,
+    `Make the SMALLEST repair necessary to satisfy the acceptance criteria above.`,
+    `Do NOT add features.`,
+    `Do NOT refactor unrelated code.`,
+    `Do NOT future-proof.`,
+    `Do NOT work on deferred features.`,
+    `Repair only what is needed to satisfy this feature's acceptance criteria.`,
+    `Stop once the minimum repair is done and the failed validation would pass.`
   );
 
   return lines.join("\n");

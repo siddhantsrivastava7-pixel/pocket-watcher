@@ -1,22 +1,29 @@
 #!/usr/bin/env node
 /**
- * Pocket Watcher CLI — V1
+ * Pocket Watcher CLI — V1 + packaging
  *
  * Commands:
  *   pocket init [--budget <n>]
  *   pocket scope "<request>"
  *   pocket status
  *   pocket run <feature-id>
+ *   pocket validate <feature-id>
+ *   pocket validate --all
+ *   pocket check
+ *   pocket repair <feature-id>
  *   pocket defer <feature-id>
  *   pocket land
  *   pocket resume [--budget <n>]
+ *   pocket install bob [--global|--project]
  */
 import { argv, exit, stdin, stdout } from "node:process";
 import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
-import { loadContract, saveContract, appendHistory } from "./store.js";
-import { totalReserve, spendableBudget, computeRiskState, canStartFeature, recordSpend, applyBurnFactorReforecast, deferFeature, openNewWindow, buildForecast, nextProjectState, bobMaxCost, featureWallet, planningWallet, resolveAssignedBudget, buildInitialPhaseAllocation, DEFAULT_RESERVES, DEFAULT_OVERSHOOT_GUARD, } from "./budget.js";
-import { runWithBudget, buildFeaturePrompt } from "./runner.js";
+import { loadContract, saveContract, appendHistory, appendValidationHistory, appendRepairHistory, appendProjectCheckHistory } from "./store.js";
+import { totalReserve, spendableBudget, computeRiskState, canStartFeature, canRepairFeature, recordSpend, recordRepairSpend, setFeatureStatus, applyBurnFactorReforecast, deferFeature, openNewWindow, buildForecast, nextProjectState, bobMaxCost, featureWallet, repairWallet, planningWallet, resolveAssignedBudget, buildInitialPhaseAllocation, DEFAULT_RESERVES, DEFAULT_OVERSHOOT_GUARD, } from "./budget.js";
+import { runWithBudget, buildFeaturePrompt, buildRepairPrompt } from "./runner.js";
+import { validateFeature, validateProject } from "./validation.js";
+import { installSkill } from "./install.js";
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
@@ -36,6 +43,8 @@ function featureStatusIcon(s) {
         case "running": return "▶";
         case "deferred": return "⏸";
         case "budget_interrupted": return "⚡";
+        case "awaiting_validation": return "?";
+        case "validation_failed": return "✗";
         default: return "○";
     }
 }
@@ -71,10 +80,8 @@ function parseBudgetFlag(args) {
 /**
  * Attempt to get provider remaining quota.
  * Bob V1: no reliable API for remaining balance → returns null.
- * Future: check Bob account API here.
  */
 async function getProviderRemaining() {
-    // Bob V1 does not expose remaining quota via a reliable supported API.
     return null;
 }
 /**
@@ -95,14 +102,11 @@ async function askUserForBudget() {
 // ---------------------------------------------------------------------------
 async function cmdInit(args) {
     const userBudget = parseBudgetFlag(args);
-    // Attempt to get provider remaining
     let providerRemaining = await getProviderRemaining();
-    // If no user budget and no provider info: ask user
     if (userBudget === null && providerRemaining === null) {
         providerRemaining = await askUserForBudget();
     }
     const resolved = resolveAssignedBudget(providerRemaining, userBudget);
-    // Report capping
     if (resolved.capped && userBudget !== null && providerRemaining !== null) {
         console.log(`\n⚠️  Budget capped:`);
         console.log(`   Requested budget       ${bc(userBudget)}`);
@@ -124,13 +128,11 @@ async function cmdInit(args) {
         createdAt: now,
         closedAt: null,
     };
-    // Determine actual mode for auto vs manually_supplied
     if (userBudget === null) {
         if (resolved.budgetMode === "auto") {
             window.budgetMode = "auto";
         }
         else {
-            // providerRemaining was obtained via user prompt
             window.budgetMode = "manually_supplied";
         }
     }
@@ -204,9 +206,7 @@ async function cmdScope(args) {
         exit(1);
     }
     const stateBefore = contract.state;
-    // Record planning spend
     contract = recordSpend(contract, null, planResult.actualCost, planResult.costLimitHit);
-    // Append history
     const histEntry = {
         windowId: contract.currentWindow.windowId,
         timestamp: new Date().toISOString(),
@@ -228,18 +228,15 @@ async function cmdScope(args) {
         note: "planning run",
     };
     await appendHistory(histEntry);
-    // Parse features from planning output
     const planOutput = planResult.resultLine?.last_message ?? "";
     const candidates = parsePlanningOutput(planOutput);
     if (candidates.length === 0) {
-        // Fallback: show raw output and ask user to define features manually
         console.log(`\n⚠️  Could not automatically parse features from planning output.`);
         console.log(`\nPlanning output:\n${planOutput.slice(0, 2000)}`);
         console.log(`\nAdd features manually to .pocket/ship-contract.json`);
         await saveContract(contract);
         return;
     }
-    // Calculate safe feature envelope
     const newSpendable = spendableBudget(contract);
     const totalHighEstimate = candidates.reduce((s, f) => s + f.estimate.high, 0);
     console.log(`\nCandidate features (${candidates.length}):`);
@@ -271,7 +268,6 @@ async function cmdScope(args) {
     const deferredIds = candidates
         .filter((f) => !selectedFeatures.some((s) => s.id === f.id))
         .map((f) => f.id);
-    // Assign window ID to features
     const featuresWithWindow = [
         ...selectedFeatures.map((f) => ({
             ...f,
@@ -327,7 +323,6 @@ function buildPlanningPrompt(request, spendableBudgetBC) {
     ].join("\n");
 }
 function parsePlanningOutput(output) {
-    // Try to extract a JSON array from the output
     const match = output.match(/\[[\s\S]*\]/);
     if (!match)
         return [];
@@ -426,7 +421,6 @@ async function cmdStatus() {
 // ---------------------------------------------------------------------------
 async function cmdRun(featureId) {
     let contract = await loadContract();
-    // Pre-flight checks
     const feature = contract.features.find((f) => f.id === featureId);
     if (!feature) {
         console.error(`Error: feature "${featureId}" not found`);
@@ -440,13 +434,13 @@ async function cmdRun(featureId) {
         console.error(`Error: feature "${featureId}" is deferred. Use 'pocket defer' to manage.`);
         exit(1);
     }
+    // LAND mode: block ALL new pending features.
+    // Only allows validation, check, and repair (handled by separate commands).
     if (contract.state === "LAND") {
-        // LAND blocks new features but allows finishing interrupted ones
-        if (feature.status !== "budget_interrupted") {
-            console.error(`🚨 Project is in LAND mode. No new features may be started.\n` +
-                `   Only budget_interrupted features can be retried. Use 'pocket land' to manage landing.`);
-            exit(2);
-        }
+        console.error(`🚨 Project is in LAND mode. No new features may be started.\n` +
+            `   LAND allows: pocket validate, pocket check, pocket repair <id> for failed features.\n` +
+            `   Use 'pocket status' to review the current state.`);
+        exit(2);
     }
     if (contract.state === "COMPRESS") {
         console.error(`⚠️  Project is in COMPRESS mode. Run 'pocket status' and 'pocket defer' to reduce scope first.`);
@@ -487,7 +481,6 @@ async function cmdRun(featureId) {
     console.log(`  bob --max-cost    : ${bc(maxCost)}`);
     console.log(`  Spendable budget  : ${bc(spendableBudget(contract))}`);
     console.log();
-    // Mark as running
     const stateBefore = contract.state;
     contract = {
         ...contract,
@@ -514,16 +507,14 @@ async function cmdRun(featureId) {
     if (resultLine?.last_message) {
         console.log(`  Last message      : ${resultLine.last_message.slice(0, 120)}`);
     }
-    // Record spend
+    // recordSpend: non-interrupted run → awaiting_validation (NOT done)
     contract = recordSpend(contract, featureId, actualCost, costLimitHit);
-    // Apply burn-factor reforecast if feature was completed (not interrupted)
     if (!costLimitHit) {
         contract = applyBurnFactorReforecast(contract, featureId, actualCost);
     }
     await saveContract(contract);
     const risk = computeRiskState(contract);
     const finalFeature = contract.features.find((f) => f.id === featureId);
-    // Append history
     const histEntry = {
         windowId: contract.currentWindow.windowId,
         timestamp: new Date().toISOString(),
@@ -542,7 +533,7 @@ async function cmdRun(featureId) {
         finalFeatureStatus: finalFeature?.status ?? null,
         stateBefore,
         stateAfter: contract.state,
-        note: costLimitHit ? "budget interrupted" : "completed",
+        note: costLimitHit ? "budget interrupted" : "completed — awaiting validation",
     };
     await appendHistory(histEntry);
     console.log(`\nBudget updated:`);
@@ -555,11 +546,300 @@ async function cmdRun(featureId) {
         console.log(`\n⚡ Cost limit hit — feature marked budget_interrupted.`);
         console.log(`   Partial workspace changes may exist.`);
         console.log(`   Feature is NOT considered completed.`);
+        console.log(`   Use: pocket repair ${featureId}`);
+    }
+    else {
+        // Run deterministic validation immediately after a normal completion
+        console.log(`\n🔍 Running deterministic validation for ${featureId}...`);
+        await runAndReportValidation(contract, feature);
     }
     console.log();
 }
 // ---------------------------------------------------------------------------
-// 5. pocket defer <feature-id>
+// Shared validation runner (used by cmdRun and cmdValidate)
+// ---------------------------------------------------------------------------
+async function runAndReportValidation(contract, feature) {
+    const valResult = await validateFeature(feature);
+    if (valResult === null) {
+        // No deterministic validation configured
+        contract = setFeatureStatus(contract, feature.id, "awaiting_validation");
+        await saveContract(contract);
+        const valHistEntry = {
+            event: "validation",
+            timestamp: new Date().toISOString(),
+            featureId: feature.id,
+            commands: [],
+            passed: false,
+            durationMs: 0,
+        };
+        await appendValidationHistory(valHistEntry);
+        console.log(`\n⚠️  No deterministic validation configured for ${feature.id}.`);
+        console.log(`   Feature status: awaiting_validation`);
+        console.log(`   Deterministic acceptance evidence is unavailable.`);
+        console.log(`   Configure feature.validation.commands in .pocket/ship-contract.json`);
+        console.log(`   or manually verify and update status to done.`);
+        return;
+    }
+    const valHistEntry = {
+        event: "validation",
+        timestamp: new Date().toISOString(),
+        featureId: feature.id,
+        commands: valResult.commands,
+        passed: valResult.passed,
+        durationMs: valResult.durationMs,
+    };
+    await appendValidationHistory(valHistEntry);
+    if (valResult.passed) {
+        contract = setFeatureStatus(contract, feature.id, "done");
+        await saveContract(contract);
+        console.log(`\n✅ Validation PASSED — feature ${feature.id} marked done.`);
+        console.log(`   Ran ${valResult.commands.length} command(s) in ${valResult.durationMs}ms`);
+    }
+    else {
+        contract = setFeatureStatus(contract, feature.id, "validation_failed");
+        await saveContract(contract);
+        console.log(`\n❌ Validation FAILED — feature ${feature.id} marked validation_failed.`);
+        for (const cmd of valResult.commands) {
+            const mark = cmd.passed ? "✓" : "✗";
+            console.log(`  ${mark} ${cmd.command}  (exit ${cmd.exitCode})`);
+            if (!cmd.passed && cmd.stderr) {
+                console.log(`     stderr: ${cmd.stderr.trim().slice(0, 200)}`);
+            }
+        }
+        console.log(`\n   Use: pocket repair ${feature.id}`);
+    }
+}
+// ---------------------------------------------------------------------------
+// 5. pocket validate <feature-id> | --all
+// ---------------------------------------------------------------------------
+async function cmdValidate(args) {
+    const contract = await loadContract();
+    if (args[0] === "--all") {
+        await cmdValidateAll(contract);
+        return;
+    }
+    const featureId = args[0];
+    if (!featureId) {
+        console.error("Usage: pocket validate <feature-id> | --all");
+        exit(1);
+    }
+    const feature = contract.features.find((f) => f.id === featureId);
+    if (!feature) {
+        console.error(`Error: feature "${featureId}" not found`);
+        exit(1);
+    }
+    if (feature.status === "deferred") {
+        console.error(`Error: feature "${featureId}" is deferred — skipping validation.`);
+        exit(1);
+    }
+    console.log(`\n🔍 Validating ${featureId}: ${feature.name}`);
+    console.log(`   (zero Bobcoins consumed)`);
+    await runAndReportValidation(contract, feature);
+    console.log();
+}
+async function cmdValidateAll(contract) {
+    const eligible = contract.features.filter((f) => f.status !== "deferred" &&
+        f.status !== "pending" &&
+        f.validation &&
+        f.validation.commands.length > 0);
+    if (eligible.length === 0) {
+        console.log(`\nNo features with deterministic validation configured (or none are eligible).`);
+        return;
+    }
+    console.log(`\n🔍 Validating ${eligible.length} feature(s) — zero Bobcoins consumed`);
+    console.log(`═══════════════════════════════════════════`);
+    for (const feature of eligible) {
+        console.log(`\n  [${feature.id}] ${feature.name}`);
+        await runAndReportValidation(contract, feature);
+        // Re-load after each save
+        contract = await loadContract();
+        const updated = contract.features.find((f) => f.id === feature.id);
+        if (updated) {
+            console.log(`  Status: ${updated.status}`);
+        }
+    }
+    console.log();
+}
+// ---------------------------------------------------------------------------
+// 6. pocket check — project-level validation
+// ---------------------------------------------------------------------------
+async function cmdCheck() {
+    const contract = await loadContract();
+    if (!contract.projectValidation || contract.projectValidation.commands.length === 0) {
+        console.log(`\nNo project-level validation configured.`);
+        console.log(`Add "projectValidation": {"commands": [...]} to .pocket/ship-contract.json`);
+        return;
+    }
+    console.log(`\n🔍 Project validation check — zero Bobcoins consumed`);
+    console.log(`═══════════════════════════════════════════`);
+    for (const cmd of contract.projectValidation.commands) {
+        console.log(`  → ${cmd}`);
+    }
+    console.log();
+    const result = await validateProject(contract.projectValidation);
+    if (result === null) {
+        console.log(`No project validation commands to run.`);
+        return;
+    }
+    const histEntry = {
+        event: "project_check",
+        timestamp: new Date().toISOString(),
+        commands: result.commands,
+        passed: result.passed,
+        durationMs: result.durationMs,
+    };
+    await appendProjectCheckHistory(histEntry);
+    if (result.passed) {
+        console.log(`✅ Project check PASSED in ${result.durationMs}ms`);
+        for (const cmd of result.commands) {
+            console.log(`  ✓ ${cmd.command}`);
+        }
+    }
+    else {
+        console.log(`❌ Project check FAILED in ${result.durationMs}ms`);
+        for (const cmd of result.commands) {
+            const mark = cmd.passed ? "✓" : "✗";
+            console.log(`  ${mark} ${cmd.command}  (exit ${cmd.exitCode})`);
+            if (!cmd.passed && cmd.stderr) {
+                console.log(`     stderr: ${cmd.stderr.trim().slice(0, 300)}`);
+            }
+        }
+        console.log(`\nResult NOT fabricated. Fix the failures above.`);
+    }
+    console.log();
+}
+// ---------------------------------------------------------------------------
+// 7. pocket repair <feature-id>
+// ---------------------------------------------------------------------------
+async function cmdRepair(featureId) {
+    let contract = await loadContract();
+    const feature = contract.features.find((f) => f.id === featureId);
+    if (!feature) {
+        console.error(`Error: feature "${featureId}" not found`);
+        exit(1);
+    }
+    // Repair eligibility check
+    const eligibleStatuses = ["validation_failed", "budget_interrupted", "awaiting_validation"];
+    if (!eligibleStatuses.includes(feature.status)) {
+        console.error(`Error: feature "${featureId}" is not eligible for repair.\n` +
+            `  Current status: ${feature.status}\n` +
+            `  Eligible:       ${eligibleStatuses.join(", ")}`);
+        exit(1);
+    }
+    // LAND mode allows repair of failed must-ship features
+    // COMPRESS mode also allows repair
+    if (!canRepairFeature(contract, feature)) {
+        const repairReserve = contract.reserves.repair;
+        console.error(`🚨 LANDING BUDGET TOO LOW FOR REPAIR\n` +
+            `   Repair reserve : ${bc(repairReserve)}\n` +
+            `   Overshoot guard: ${bc(contract.overshootGuard)}\n` +
+            `   Safe repair amt: ${bc(repairReserve - contract.overshootGuard)}\n` +
+            `   Workspace preserved. Cannot launch Bob for repair.`);
+        exit(2);
+    }
+    const rWallet = repairWallet(contract);
+    if (rWallet === null || rWallet <= 0) {
+        console.error(`🚨 LANDING BUDGET TOO LOW FOR REPAIR. Workspace preserved.`);
+        exit(2);
+    }
+    // Get failed commands for the repair prompt
+    const failedCommands = feature.validation
+        ? (await validateFeature(feature))?.commands.filter((c) => !c.passed) ?? []
+        : [];
+    console.log(`\n🔧 Repair: [${feature.id}] ${feature.name}`);
+    console.log(`  Status         : ${feature.status}`);
+    console.log(`  Repair wallet  : ${bc(rWallet)}`);
+    console.log(`  (funded from repair reserve only)`);
+    console.log();
+    // Build repair prompt
+    const repairPrompt = buildRepairPrompt(feature, failedCommands, contract.deferredFeatureIds);
+    // Mark as running
+    const stateBefore = contract.state;
+    contract = {
+        ...contract,
+        activeFeatureId: featureId,
+        features: contract.features.map((f) => f.id === featureId ? { ...f, status: "running" } : f),
+        updatedAt: new Date().toISOString(),
+    };
+    await saveContract(contract);
+    let runResult;
+    try {
+        runResult = await runWithBudget(repairPrompt, rWallet);
+    }
+    catch (err) {
+        console.error(`Error running bob repair: ${err.message}`);
+        exit(1);
+    }
+    const { actualCost, costLimitHit, exitCode, resultLine } = runResult;
+    console.log(`\nRepair run complete:`);
+    console.log(`  Exit code         : ${exitCode}`);
+    console.log(`  Cost limit hit    : ${costLimitHit}`);
+    console.log(`  Actual cost       : ${bc(actualCost)}`);
+    // Record repair spend from repair reserve
+    contract = recordRepairSpend(contract, featureId, actualCost, costLimitHit);
+    await saveContract(contract);
+    // Run validation after repair
+    const updatedFeature = contract.features.find((f) => f.id === featureId);
+    let validationPassed = null;
+    if (!costLimitHit && updatedFeature) {
+        console.log(`\n🔍 Running deterministic validation after repair...`);
+        const valResult = await validateFeature(updatedFeature);
+        if (valResult !== null) {
+            validationPassed = valResult.passed;
+            const valHistEntry = {
+                event: "validation",
+                timestamp: new Date().toISOString(),
+                featureId,
+                commands: valResult.commands,
+                passed: valResult.passed,
+                durationMs: valResult.durationMs,
+            };
+            await appendValidationHistory(valHistEntry);
+            if (valResult.passed) {
+                contract = setFeatureStatus(contract, featureId, "done");
+                await saveContract(contract);
+                console.log(`\n✅ Repair + validation PASSED — ${featureId} marked done.`);
+            }
+            else {
+                contract = setFeatureStatus(contract, featureId, "validation_failed");
+                await saveContract(contract);
+                console.log(`\n❌ Repair completed but validation still FAILED — ${featureId} remains validation_failed.`);
+                for (const cmd of valResult.commands) {
+                    const mark = cmd.passed ? "✓" : "✗";
+                    console.log(`  ${mark} ${cmd.command}  (exit ${cmd.exitCode})`);
+                }
+            }
+        }
+        else {
+            contract = setFeatureStatus(contract, featureId, "awaiting_validation");
+            await saveContract(contract);
+            console.log(`\n⚠️  No deterministic validation configured. Status: awaiting_validation`);
+        }
+    }
+    const finalFeature = contract.features.find((f) => f.id === featureId);
+    const repairHistEntry = {
+        event: "repair",
+        timestamp: new Date().toISOString(),
+        windowId: contract.currentWindow.windowId,
+        featureId,
+        assignedRepairWallet: rWallet,
+        bobMaxCost: rWallet,
+        realSessionCosts: actualCost,
+        durationMs: resultLine?.stats.duration_ms ?? null,
+        toolCalls: resultLine?.stats.tool_calls ?? null,
+        bobTaskId: resultLine?.stats.task_id ?? null,
+        costLimitHit,
+        validationPassed,
+        finalFeatureStatus: finalFeature?.status ?? "validation_failed",
+        note: costLimitHit ? "repair budget interrupted" : "repair completed",
+    };
+    await appendRepairHistory(repairHistEntry);
+    console.log(`\nRepair reserve remaining: ${bc(contract.reserves.repair)}`);
+    console.log(`Project state: ${contract.state}`);
+    console.log();
+}
+// ---------------------------------------------------------------------------
+// 8. pocket defer <feature-id>
 // ---------------------------------------------------------------------------
 async function cmdDefer(featureId) {
     let contract = await loadContract();
@@ -580,7 +860,7 @@ async function cmdDefer(featureId) {
     console.log();
 }
 // ---------------------------------------------------------------------------
-// 6. pocket land
+// 9. pocket land
 // ---------------------------------------------------------------------------
 async function cmdLand() {
     let contract = await loadContract();
@@ -603,19 +883,23 @@ async function cmdLand() {
     console.log(`  Spendable   : ${bc(spendable)}`);
     console.log(``);
     console.log(`LAND blocks:`);
-    console.log(`  - new features`);
-    console.log(`  - optional refactors`);
+    console.log(`  - new pending product features`);
+    console.log(`  - optional features`);
     console.log(`  - deferred work`);
+    console.log(`  - speculative refactors`);
+    console.log(`  - architecture cleanup`);
     console.log(``);
     console.log(`LAND allows:`);
-    console.log(`  - finish active budget_interrupted feature`);
-    console.log(`  - integration, build, typecheck`);
-    console.log(`  - critical-path tests`);
-    console.log(`  - final repair and checkpoint`);
+    console.log(`  - pocket validate <id>`);
+    console.log(`  - pocket validate --all`);
+    console.log(`  - pocket check`);
+    console.log(`  - pocket repair <id>  (for validation_failed / budget_interrupted features)`);
+    console.log(`  - critical build/typecheck/test fixes`);
+    console.log(`  - final checkpoint/handoff`);
     console.log();
 }
 // ---------------------------------------------------------------------------
-// 7. pocket resume [--budget <n>]
+// 10. pocket resume [--budget <n>]
 // ---------------------------------------------------------------------------
 async function cmdResume(args) {
     const userBudget = parseBudgetFlag(args);
@@ -624,15 +908,12 @@ async function cmdResume(args) {
         console.log(`Project is already SHIPPED. No resume needed.`);
         return;
     }
-    // Attempt to get provider remaining for the new window
     let providerRemaining = await getProviderRemaining();
-    // If no user budget and no provider info: ask user
     if (userBudget === null && providerRemaining === null) {
         console.log(`\nStarting new compute window...`);
         providerRemaining = await askUserForBudget();
     }
     const resolved = resolveAssignedBudget(providerRemaining, userBudget);
-    // Report capping
     if (resolved.capped && userBudget !== null && providerRemaining !== null) {
         console.log(`\n⚠️  Budget capped for new window:`);
         console.log(`   Requested              ${bc(userBudget)}`);
@@ -640,7 +921,6 @@ async function cmdResume(args) {
         console.log(`   Maximum assignable     ${bc(providerRemaining)}`);
     }
     contract = openNewWindow(contract, resolved.assignedBudget, resolved.providerRemainingAtStart, resolved.budgetMode);
-    // If user specified budget with no provider info, update the mode
     if (userBudget !== null && providerRemaining === null) {
         contract = {
             ...contract,
@@ -656,14 +936,60 @@ async function cmdResume(args) {
     }
     console.log(`  Assigned budget : ${bc(cw.assignedBudget)}`);
     console.log(`  Previous windows preserved: ${contract.previousWindows.length}`);
-    const interrupted = contract.features.filter((f) => f.status === "pending");
-    if (interrupted.length > 0) {
+    const resumed = contract.features.filter((f) => f.status === "pending");
+    if (resumed.length > 0) {
         console.log(`\n  Resumed features:`);
-        for (const f of interrupted) {
+        for (const f of resumed) {
             console.log(`    ○ ${f.id}: ${f.name}`);
         }
     }
     console.log();
+}
+// ---------------------------------------------------------------------------
+// 11. pocket install bob [--global|--project]
+// ---------------------------------------------------------------------------
+async function cmdInstall(args) {
+    const target = args[0];
+    if (target !== "bob") {
+        console.error(`Usage: pocket install bob [--global|--project]`);
+        console.error(`  bob    Install as a Bob Skill`);
+        exit(1);
+    }
+    const hasGlobal = args.includes("--global");
+    const hasProject = args.includes("--project");
+    // Default: project scope (safer — doesn't touch user home dir without flag)
+    const scope = hasGlobal ? "global" : "project";
+    if (!hasGlobal && !hasProject) {
+        console.log(`\n⚠️  No scope flag provided. Defaulting to --project (safer).`);
+        console.log(`   Use --global to install for all workspaces.`);
+    }
+    console.log(`\n📦 Installing pocket-watcher Bob Skill (${scope})...`);
+    try {
+        const result = await installSkill(scope);
+        if (result.warnings.length > 0) {
+            for (const w of result.warnings) {
+                console.error(`  ⚠️  ${w}`);
+            }
+            exit(1);
+        }
+        const action = result.created ? "Installed" : "Updated";
+        console.log(`\n✅ ${action} pocket-watcher skill`);
+        console.log(`   Scope     : ${scope}`);
+        console.log(`   Directory : ${result.skillDir}`);
+        console.log(`   SKILL.md  : ${result.skillMdPath}`);
+        console.log(``);
+        if (scope === "global") {
+            console.log(`   Open any Bob workspace and invoke: /pocket-watcher`);
+        }
+        else {
+            console.log(`   In this project, invoke: /pocket-watcher`);
+        }
+        console.log();
+    }
+    catch (err) {
+        console.error(`Error installing skill: ${err.message}`);
+        exit(1);
+    }
 }
 // ---------------------------------------------------------------------------
 // Entrypoint
@@ -689,6 +1015,21 @@ async function main() {
             await cmdRun(featureId);
             break;
         }
+        case "validate":
+            await cmdValidate(rest);
+            break;
+        case "check":
+            await cmdCheck();
+            break;
+        case "repair": {
+            const featureId = rest[0];
+            if (!featureId) {
+                console.error("Usage: pocket repair <feature-id>");
+                exit(1);
+            }
+            await cmdRepair(featureId);
+            break;
+        }
         case "defer": {
             const featureId = rest[0];
             if (!featureId) {
@@ -704,15 +1045,22 @@ async function main() {
         case "resume":
             await cmdResume(rest);
             break;
+        case "install":
+            await cmdInstall(rest);
+            break;
         default:
             console.log("Usage:");
             console.log("  pocket init [--budget <n>]");
             console.log("  pocket scope \"<request>\"");
             console.log("  pocket status");
             console.log("  pocket run <feature-id>");
+            console.log("  pocket validate <feature-id> | --all");
+            console.log("  pocket check");
+            console.log("  pocket repair <feature-id>");
             console.log("  pocket defer <feature-id>");
             console.log("  pocket land");
             console.log("  pocket resume [--budget <n>]");
+            console.log("  pocket install bob [--global|--project]");
             exit(1);
     }
 }

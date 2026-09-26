@@ -43,21 +43,27 @@ export function spendableBudget(contract) {
 // Forecast
 // ---------------------------------------------------------------------------
 /**
+ * Statuses that count as "still needing work" for forecast purposes.
+ * awaiting_validation and validation_failed are not fully done.
+ */
+const UNFINISHED_STATUSES = [
+    "pending",
+    "running",
+    "budget_interrupted",
+    "awaiting_validation",
+    "validation_failed",
+];
+/**
  * Sum of high estimates for features that are not done/deferred.
- * Only counts "must" priority by default; includes all non-done features.
  */
 export function forecastHighRemaining(contract) {
     return contract.features
-        .filter((f) => f.status === "pending" ||
-        f.status === "running" ||
-        f.status === "budget_interrupted")
+        .filter((f) => UNFINISHED_STATUSES.includes(f.status))
         .reduce((sum, f) => sum + f.estimate.high, 0);
 }
 export function forecastLowRemaining(contract) {
     return contract.features
-        .filter((f) => f.status === "pending" ||
-        f.status === "running" ||
-        f.status === "budget_interrupted")
+        .filter((f) => UNFINISHED_STATUSES.includes(f.status))
         .reduce((sum, f) => sum + f.estimate.low, 0);
 }
 // ---------------------------------------------------------------------------
@@ -108,6 +114,24 @@ export function featureWallet(contract, feature) {
 export function bobMaxCost(contract, feature) {
     const wallet = featureWallet(contract, feature);
     const safe = wallet - contract.overshootGuard;
+    if (safe <= 0)
+        return null;
+    return safe;
+}
+// ---------------------------------------------------------------------------
+// Repair wallet (from repair reserve only)
+// ---------------------------------------------------------------------------
+/**
+ * Calculate the repair wallet available for a single repair run.
+ *
+ * Repair is funded ONLY from the repair reserve, not from feature spendable.
+ * repairWallet = repair reserve - overshootGuard
+ *
+ * Returns null if the remaining reserve is too small to justify a repair run.
+ */
+export function repairWallet(contract) {
+    const repairReserve = contract.reserves.repair;
+    const safe = repairReserve - contract.overshootGuard;
     if (safe <= 0)
         return null;
     return safe;
@@ -190,10 +214,33 @@ export function canStartFeature(contract, feature) {
     return maxCost !== null && maxCost > 0;
 }
 // ---------------------------------------------------------------------------
+// canRepairFeature
+// ---------------------------------------------------------------------------
+/**
+ * Returns true if a feature is eligible for repair.
+ *
+ * Eligible statuses: validation_failed, budget_interrupted, awaiting_validation
+ * The repair wallet must be > 0 after overshoot guard.
+ */
+export function canRepairFeature(contract, feature) {
+    const eligibleStatuses = [
+        "validation_failed",
+        "budget_interrupted",
+        "awaiting_validation",
+    ];
+    if (!eligibleStatuses.includes(feature.status))
+        return false;
+    const wallet = repairWallet(contract);
+    return wallet !== null && wallet > 0;
+}
+// ---------------------------------------------------------------------------
 // State transitions
 // ---------------------------------------------------------------------------
 export function nextProjectState(contract, risk) {
-    const hasPending = contract.features.some((f) => f.status === "pending" || f.status === "budget_interrupted");
+    const hasPending = contract.features.some((f) => f.status === "pending" ||
+        f.status === "budget_interrupted" ||
+        f.status === "awaiting_validation" ||
+        f.status === "validation_failed");
     if (risk === "UNSAFE") {
         return hasPending ? "COMPRESS" : "LAND";
     }
@@ -205,6 +252,10 @@ export function nextProjectState(contract, risk) {
 /**
  * Record actual spend for a run and return an updated contract.
  * Does NOT mutate input.
+ *
+ * After a non-interrupted Bob run, the feature is NOT marked done.
+ * It is set to awaiting_validation (no deterministic validation configured)
+ * or left for the caller to update after running validation.
  *
  * @param featureId   Feature that was run (null for planning/integration phases)
  * @param actualSpend Real session_costs from Bob
@@ -223,13 +274,12 @@ export function recordSpend(contract, featureId, actualSpend, interrupted) {
         updatedFeatures = contract.features.map((f) => {
             if (f.id !== featureId)
                 return f;
-            return {
-                ...f,
-                actualSpent: f.actualSpent + actualSpend,
-                status: interrupted
-                    ? "budget_interrupted"
-                    : "done",
-            };
+            if (interrupted) {
+                return { ...f, actualSpent: f.actualSpent + actualSpend, status: "budget_interrupted" };
+            }
+            // Not interrupted — do NOT mark done. Set awaiting_validation so
+            // the caller must run deterministic validation before done.
+            return { ...f, actualSpent: f.actualSpent + actualSpend, status: "awaiting_validation" };
         });
     }
     const partialContract = {
@@ -247,6 +297,66 @@ export function recordSpend(contract, featureId, actualSpend, interrupted) {
         ...partialContract,
         forecast,
         state,
+    };
+}
+/**
+ * Record actual spend from a repair run.
+ * Repair budget comes from the repair reserve — does not affect feature spendable.
+ * After repair spend is recorded, caller must run validation to finalize status.
+ */
+export function recordRepairSpend(contract, featureId, actualSpend, interrupted) {
+    // Deduct from the repair reserve
+    const newRepairReserve = Math.max(0, contract.reserves.repair - actualSpend);
+    const updatedReserves = {
+        ...contract.reserves,
+        repair: newRepairReserve,
+    };
+    // Update window spend (repair still consumes real compute)
+    const updatedWindow = {
+        ...contract.currentWindow,
+        actualSpent: contract.currentWindow.actualSpent + actualSpend,
+        remainingAssignedBudget: contract.currentWindow.remainingAssignedBudget - actualSpend,
+    };
+    // Update feature spend but leave status for validation to determine
+    const updatedFeatures = contract.features.map((f) => {
+        if (f.id !== featureId)
+            return f;
+        if (interrupted) {
+            return { ...f, actualSpent: f.actualSpent + actualSpend, status: "budget_interrupted" };
+        }
+        return { ...f, actualSpent: f.actualSpent + actualSpend, status: "awaiting_validation" };
+    });
+    const partialContract = {
+        ...contract,
+        currentWindow: updatedWindow,
+        reserves: updatedReserves,
+        features: updatedFeatures,
+        activeFeatureId: null,
+        updatedAt: new Date().toISOString(),
+    };
+    const forecast = buildForecast(partialContract);
+    return {
+        ...partialContract,
+        forecast,
+        state: nextProjectState(partialContract, forecast.riskState),
+    };
+}
+/**
+ * Update a single feature's status (e.g., after validation runs).
+ * Does NOT mutate input.
+ */
+export function setFeatureStatus(contract, featureId, status) {
+    const updatedFeatures = contract.features.map((f) => f.id === featureId ? { ...f, status } : f);
+    const partialContract = {
+        ...contract,
+        features: updatedFeatures,
+        updatedAt: new Date().toISOString(),
+    };
+    const forecast = buildForecast(partialContract);
+    return {
+        ...partialContract,
+        forecast,
+        state: nextProjectState(partialContract, forecast.riskState),
     };
 }
 // ---------------------------------------------------------------------------

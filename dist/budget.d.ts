@@ -5,7 +5,7 @@
  *
  * Compute budget is generic. For Bob V1 the unit is "bobcoin".
  */
-import type { ShipContract, Feature, Reserves, RiskState, ProjectState, ComputeWindow, Forecast, PhaseAllocation, BudgetMode } from "./types.js";
+import type { ShipContract, Feature, Reserves, RiskState, ProjectState, ComputeWindow, Forecast, PhaseAllocation, BudgetMode, FeatureStatus } from "./types.js";
 /** Default overshoot guard subtracted from featureWallet before --max-cost. */
 export declare const DEFAULT_OVERSHOOT_GUARD = 0.01;
 /** Planning cap as a fraction of flexible spendable budget. */
@@ -25,7 +25,6 @@ export declare function windowRemaining(w: ComputeWindow): number;
 export declare function spendableBudget(contract: ShipContract): number;
 /**
  * Sum of high estimates for features that are not done/deferred.
- * Only counts "must" priority by default; includes all non-done features.
  */
 export declare function forecastHighRemaining(contract: ShipContract): number;
 export declare function forecastLowRemaining(contract: ShipContract): number;
@@ -49,6 +48,15 @@ export declare function buildForecast(contract: ShipContract): Forecast;
  */
 export declare function featureWallet(contract: ShipContract, feature: Feature): number;
 export declare function bobMaxCost(contract: ShipContract, feature: Feature): number | null;
+/**
+ * Calculate the repair wallet available for a single repair run.
+ *
+ * Repair is funded ONLY from the repair reserve, not from feature spendable.
+ * repairWallet = repair reserve - overshootGuard
+ *
+ * Returns null if the remaining reserve is too small to justify a repair run.
+ */
+export declare function repairWallet(contract: ShipContract): number | null;
 export declare function planningWallet(contract: ShipContract): number;
 /**
  * Determine assigned budget given provider remaining and optional user cap.
@@ -76,16 +84,38 @@ export declare function buildInitialPhaseAllocation(assignedBudget: number, rese
  * bobMaxCost must be > 0 after subtracting overshoot guard.
  */
 export declare function canStartFeature(contract: ShipContract, feature: Feature): boolean;
+/**
+ * Returns true if a feature is eligible for repair.
+ *
+ * Eligible statuses: validation_failed, budget_interrupted, awaiting_validation
+ * The repair wallet must be > 0 after overshoot guard.
+ */
+export declare function canRepairFeature(contract: ShipContract, feature: Feature): boolean;
 export declare function nextProjectState(contract: ShipContract, risk: RiskState): ProjectState;
 /**
  * Record actual spend for a run and return an updated contract.
  * Does NOT mutate input.
+ *
+ * After a non-interrupted Bob run, the feature is NOT marked done.
+ * It is set to awaiting_validation (no deterministic validation configured)
+ * or left for the caller to update after running validation.
  *
  * @param featureId   Feature that was run (null for planning/integration phases)
  * @param actualSpend Real session_costs from Bob
  * @param interrupted True if cost-limit event was detected
  */
 export declare function recordSpend(contract: ShipContract, featureId: string | null, actualSpend: number, interrupted: boolean): ShipContract;
+/**
+ * Record actual spend from a repair run.
+ * Repair budget comes from the repair reserve — does not affect feature spendable.
+ * After repair spend is recorded, caller must run validation to finalize status.
+ */
+export declare function recordRepairSpend(contract: ShipContract, featureId: string, actualSpend: number, interrupted: boolean): ShipContract;
+/**
+ * Update a single feature's status (e.g., after validation runs).
+ * Does NOT mutate input.
+ */
+export declare function setFeatureStatus(contract: ShipContract, featureId: string, status: FeatureStatus): ShipContract;
 /**
  * If a feature overran its high estimate, apply a burn factor to all
  * remaining unfinished features of the same priority tier.
