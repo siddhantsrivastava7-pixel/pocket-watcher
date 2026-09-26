@@ -20,7 +20,7 @@ import { argv, exit, stdin, stdout } from "node:process";
 import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { loadContract, saveContract, appendHistory, appendValidationHistory, appendRepairHistory, appendProjectCheckHistory } from "./store.js";
-import { totalReserve, spendableBudget, computeRiskState, canStartFeature, canRepairFeature, recordSpend, recordRepairSpend, setFeatureStatus, applyBurnFactorReforecast, deferFeature, openNewWindow, buildForecast, nextProjectState, bobMaxCost, featureWallet, repairWallet, planningWallet, resolveAssignedBudget, buildInitialPhaseAllocation, DEFAULT_RESERVES, DEFAULT_OVERSHOOT_GUARD, } from "./budget.js";
+import { totalReserve, spendableBudget, computeRiskState, canStartFeature, canRepairFeature, recordSpend, recordRepairSpend, setFeatureStatus, applyBurnFactorReforecast, applyBurnFactorReforecastAfterValidation, deferFeature, openNewWindow, buildForecast, nextProjectState, bobMaxCost, featureWallet, repairWallet, planningWallet, resolveAssignedBudget, buildInitialPhaseAllocation, DEFAULT_RESERVES, DEFAULT_OVERSHOOT_GUARD, } from "./budget.js";
 import { runWithBudget, buildFeaturePrompt, buildRepairPrompt } from "./runner.js";
 import { validateFeature, validateProject } from "./validation.js";
 import { installSkill } from "./install.js";
@@ -559,6 +559,8 @@ async function cmdRun(featureId) {
 // Shared validation runner (used by cmdRun and cmdValidate)
 // ---------------------------------------------------------------------------
 async function runAndReportValidation(contract, feature) {
+    // Capture pre-validation status — needed to decide whether to apply cost learning.
+    const preValidationStatus = feature.status;
     const valResult = await validateFeature(feature);
     if (valResult === null) {
         // No deterministic validation configured
@@ -591,6 +593,22 @@ async function runAndReportValidation(contract, feature) {
     await appendValidationHistory(valHistEntry);
     if (valResult.passed) {
         contract = setFeatureStatus(contract, feature.id, "done");
+        // Cost-learning for interrupted-but-validated work:
+        // If the run was budget_interrupted and validation now proves it done,
+        // the actual spend is legitimate historical evidence. Apply burn factor
+        // reforecast exactly once (guarded by burnFactorApplied flag).
+        if (preValidationStatus === "budget_interrupted") {
+            const completedFeature = contract.features.find((f) => f.id === feature.id);
+            if (completedFeature && completedFeature.actualSpent > 0) {
+                contract = applyBurnFactorReforecastAfterValidation(contract, feature.id);
+                const bf = completedFeature.actualSpent / feature.estimate.high;
+                if (bf > 1.0) {
+                    console.log(`\n📊 Cost learning: interrupted run actual spend ${bc(completedFeature.actualSpent)} ` +
+                        `exceeded high estimate ${bc(feature.estimate.high)} ` +
+                        `(burn factor ${bf.toFixed(2)}×). Remaining forecasts updated.`);
+                }
+            }
+        }
         await saveContract(contract);
         console.log(`\n✅ Validation PASSED — feature ${feature.id} marked done.`);
         console.log(`   Ran ${valResult.commands.length} command(s) in ${valResult.durationMs}ms`);

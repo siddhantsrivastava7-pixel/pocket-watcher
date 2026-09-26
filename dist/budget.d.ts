@@ -126,5 +126,19 @@ export declare function setFeatureStatus(contract: ShipContract, featureId: stri
  * Does NOT mutate input.
  */
 export declare function applyBurnFactorReforecast(contract: ShipContract, completedFeatureId: string, actualSpend: number): ShipContract;
+/**
+ * Apply burn-factor reforecast after an interrupted run is later proven done
+ * by deterministic validation.
+ *
+ * Call this when:
+ *   1. A managed feature run recorded real `stats.session_costs`
+ *   2. The run was budget_interrupted
+ *   3. Deterministic validation subsequently proves the feature is done
+ *
+ * Uses the feature's accumulated actualSpent as the authoritative cost evidence.
+ * Guards against double-counting: if burnFactorApplied is already true, no-op.
+ * Does NOT mutate input.
+ */
+export declare function applyBurnFactorReforecastAfterValidation(contract: ShipContract, completedFeatureId: string): ShipContract;
 export declare function deferFeature(contract: ShipContract, featureId: string): ShipContract;
 export declare function openNewWindow(contract: ShipContract, assignedBudget: number, providerRemainingAtStart: number | null, budgetMode: BudgetMode): ShipContract;

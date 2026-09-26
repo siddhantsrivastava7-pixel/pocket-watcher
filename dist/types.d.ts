@@ -106,6 +106,11 @@ export interface Feature {
     actualSpent: number;
     /** Window in which this feature was last active. */
     windowId: number;
+    /**
+     * True once burn-factor reforecast has been applied for this feature's
+     * completed actual spend. Prevents double-application on repeated validation.
+     */
+    burnFactorApplied?: boolean;
 }
 export interface Forecast {
     /** Sum of high estimates for unfinished must features. */

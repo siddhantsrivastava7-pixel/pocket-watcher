@@ -481,11 +481,22 @@ export function applyBurnFactorReforecast(
   const completed = contract.features.find((f) => f.id === completedFeatureId);
   if (!completed) return contract;
 
+  // Guard: never apply the burn factor for this feature twice.
+  // burnFactorApplied is set true the first time we apply; subsequent calls are no-ops.
+  if (completed.burnFactorApplied) return contract;
+
   const burnFactor = actualSpend / completed.estimate.high;
-  if (burnFactor <= 1.0) return contract; // underrun — no adjustment needed
+  if (burnFactor <= 1.0) {
+    // Underrun — no adjustment to other features, but still mark as applied
+    // so that re-validation cannot trigger the check again.
+    const updatedFeatures = contract.features.map((f) =>
+      f.id === completedFeatureId ? { ...f, burnFactorApplied: true } : f
+    );
+    return { ...contract, features: updatedFeatures };
+  }
 
   const updatedFeatures = contract.features.map((f) => {
-    if (f.id === completedFeatureId) return f;
+    if (f.id === completedFeatureId) return { ...f, burnFactorApplied: true };
     if (f.status !== "pending") return f;
     return {
       ...f,
@@ -504,6 +515,37 @@ export function applyBurnFactorReforecast(
     forecast,
     state: nextProjectState(partialContract, forecast.riskState),
   };
+}
+
+/**
+ * Apply burn-factor reforecast after an interrupted run is later proven done
+ * by deterministic validation.
+ *
+ * Call this when:
+ *   1. A managed feature run recorded real `stats.session_costs`
+ *   2. The run was budget_interrupted
+ *   3. Deterministic validation subsequently proves the feature is done
+ *
+ * Uses the feature's accumulated actualSpent as the authoritative cost evidence.
+ * Guards against double-counting: if burnFactorApplied is already true, no-op.
+ * Does NOT mutate input.
+ */
+export function applyBurnFactorReforecastAfterValidation(
+  contract: ShipContract,
+  completedFeatureId: string
+): ShipContract {
+  const completed = contract.features.find((f) => f.id === completedFeatureId);
+  if (!completed) return contract;
+
+  // Only applies when the feature was previously budget_interrupted and is now done.
+  if (completed.status !== "done") return contract;
+
+  // Use the feature's accumulated actual spend as the cost evidence.
+  const actualSpend = completed.actualSpent;
+  if (actualSpend <= 0) return contract;
+
+  // Delegate to the main function (which includes the double-apply guard).
+  return applyBurnFactorReforecast(contract, completedFeatureId, actualSpend);
 }
 
 // ---------------------------------------------------------------------------

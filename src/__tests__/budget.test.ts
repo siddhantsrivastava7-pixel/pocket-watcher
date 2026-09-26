@@ -26,6 +26,7 @@ import {
   recordRepairSpend,
   setFeatureStatus,
   applyBurnFactorReforecast,
+  applyBurnFactorReforecastAfterValidation,
   deferFeature,
   openNewWindow,
   buildForecast,
@@ -1212,5 +1213,242 @@ describe("installSkill — file system operations", () => {
     const result = await installSkill("project", tmpDir);
     expect(result.warnings.length).toBeGreaterThan(0);
     expect(result.warnings[0]).toContain("does not appear to be a Pocket Watcher skill");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// COST LEARNING — interrupted + validated (Part A of task)
+// ---------------------------------------------------------------------------
+
+describe("applyBurnFactorReforecastAfterValidation — interrupted+validated cost learning", () => {
+  /**
+   * Scenario: F01 ran, was budget_interrupted, actual spend > high estimate.
+   * Validation passes → F01 becomes done.
+   * The actual spend should propagate as burn factor to remaining pending features.
+   */
+  test("interrupted→done validation applies burn factor when actual > high estimate", () => {
+    const highEstimate = 0.010;
+    const actualSpend  = 0.020; // 2× overrun
+    const contract = makeContract({
+      features: [
+        // F01: was interrupted, validation just marked it done, has actualSpent
+        makeFeature({
+          id: "F01",
+          status: "done",
+          estimate: { low: 0.008, high: highEstimate, confidence: "medium" },
+          actualSpent: actualSpend,
+        }),
+        // F02: pending, should get its estimates scaled up
+        makeFeature({
+          id: "F02",
+          status: "pending",
+          estimate: { low: 0.008, high: highEstimate, confidence: "medium" },
+          actualSpent: 0,
+        }),
+      ],
+    });
+
+    const after = applyBurnFactorReforecastAfterValidation(contract, "F01");
+
+    const f02 = after.features.find((f) => f.id === "F02")!;
+    const expectedBurnFactor = actualSpend / highEstimate; // 2.0
+    expect(f02.estimate.high).toBeCloseTo(highEstimate * expectedBurnFactor, 5);
+    expect(f02.estimate.low).toBeCloseTo(0.008 * expectedBurnFactor, 5);
+  });
+
+  test("interrupted→done: burn factor marks completed feature burnFactorApplied=true", () => {
+    const contract = makeContract({
+      features: [
+        makeFeature({ id: "F01", status: "done", estimate: { low: 0.008, high: 0.010, confidence: "medium" }, actualSpent: 0.020 }),
+        makeFeature({ id: "F02", status: "pending", estimate: { low: 0.008, high: 0.010, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+    const after = applyBurnFactorReforecastAfterValidation(contract, "F01");
+    const f01 = after.features.find((f) => f.id === "F01")!;
+    expect(f01.burnFactorApplied).toBe(true);
+  });
+
+  test("interrupted→done: repeated validation does NOT double-apply burn factor", () => {
+    const highEstimate = 0.010;
+    const actualSpend  = 0.020;
+    const contract = makeContract({
+      features: [
+        makeFeature({ id: "F01", status: "done", estimate: { low: 0.008, high: highEstimate, confidence: "medium" }, actualSpent: actualSpend }),
+        makeFeature({ id: "F02", status: "pending", estimate: { low: 0.008, high: highEstimate, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    // First application
+    const after1 = applyBurnFactorReforecastAfterValidation(contract, "F01");
+    const f02After1 = after1.features.find((f) => f.id === "F02")!;
+    const highAfter1 = f02After1.estimate.high;
+
+    // Second application — must be a no-op
+    const after2 = applyBurnFactorReforecastAfterValidation(after1, "F01");
+    const f02After2 = after2.features.find((f) => f.id === "F02")!;
+    expect(f02After2.estimate.high).toBeCloseTo(highAfter1, 8);
+  });
+
+  test("interrupted→validation_failed: no completed-feature cost learning applied", () => {
+    const highEstimate = 0.010;
+    const actualSpend  = 0.020;
+    // Feature is validation_failed — not done — burn factor must NOT apply
+    const contract = makeContract({
+      features: [
+        makeFeature({ id: "F01", status: "validation_failed", estimate: { low: 0.008, high: highEstimate, confidence: "medium" }, actualSpent: actualSpend }),
+        makeFeature({ id: "F02", status: "pending", estimate: { low: 0.008, high: highEstimate, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    const after = applyBurnFactorReforecastAfterValidation(contract, "F01");
+
+    // F01 is not done → function is a no-op
+    const f02 = after.features.find((f) => f.id === "F02")!;
+    expect(f02.estimate.high).toBeCloseTo(highEstimate, 8);
+  });
+
+  test("actual spend is not double-counted: window budget unchanged after reforecast", () => {
+    const highEstimate = 0.010;
+    const actualSpend  = 0.020;
+    const contract = makeContract({
+      currentWindow: makeWindow({ assignedBudget: 0.5, actualSpent: actualSpend }),
+      features: [
+        makeFeature({ id: "F01", status: "done", estimate: { low: 0.008, high: highEstimate, confidence: "medium" }, actualSpent: actualSpend }),
+        makeFeature({ id: "F02", status: "pending", estimate: { low: 0.008, high: highEstimate, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    const after = applyBurnFactorReforecastAfterValidation(contract, "F01");
+
+    // Window actualSpent must not be increased again — it was already recorded in recordSpend
+    expect(after.currentWindow.actualSpent).toBe(actualSpend);
+    expect(after.currentWindow.assignedBudget).toBe(0.5);
+  });
+
+  test("fixed total budget remains unchanged after cost learning", () => {
+    const contract = makeContract({
+      currentWindow: makeWindow({ assignedBudget: 0.2, actualSpent: 0.020 }),
+      features: [
+        makeFeature({ id: "F01", status: "done", estimate: { low: 0.008, high: 0.010, confidence: "medium" }, actualSpent: 0.020 }),
+        makeFeature({ id: "F02", status: "pending", estimate: { low: 0.008, high: 0.010, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    const after = applyBurnFactorReforecastAfterValidation(contract, "F01");
+
+    expect(after.currentWindow.assignedBudget).toBe(0.2);
+  });
+
+  test("no burn factor when actual spend does not exceed high estimate (underrun)", () => {
+    const highEstimate = 0.010;
+    const actualSpend  = 0.008; // underrun — actual < high
+    const contract = makeContract({
+      features: [
+        makeFeature({ id: "F01", status: "done", estimate: { low: 0.005, high: highEstimate, confidence: "medium" }, actualSpent: actualSpend }),
+        makeFeature({ id: "F02", status: "pending", estimate: { low: 0.005, high: highEstimate, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    const after = applyBurnFactorReforecastAfterValidation(contract, "F01");
+
+    // F02 estimate must be unchanged — underrun does not inflate
+    const f02 = after.features.find((f) => f.id === "F02")!;
+    expect(f02.estimate.high).toBeCloseTo(highEstimate, 8);
+  });
+
+  test("COMPRESS state after burn factor causes forecast to exceed spendable", () => {
+    // Budget small enough that after burn factor reforecast, F02 no longer fits
+    const highEstimate = 0.010;
+    const actualSpend  = 0.020;
+    // assignedBudget = 0.060 (tiny), reserves = 0.030, spendable ≈ 0.020
+    // After F01 spends 0.020, remaining ≈ 0.040, spendable ≈ 0.010
+    // F02 adjusted high estimate = 0.020 > spendable 0.010 → UNSAFE → COMPRESS
+    const contract = makeContract({
+      currentWindow: makeWindow({ assignedBudget: 0.060, actualSpent: actualSpend }),
+      reserves: makeReserves({ validation: 0.010, repair: 0.010, integration: 0.010 }),
+      features: [
+        makeFeature({ id: "F01", status: "done", estimate: { low: 0.005, high: highEstimate, confidence: "medium" }, actualSpent: actualSpend }),
+        makeFeature({ id: "F02", status: "pending", estimate: { low: 0.005, high: highEstimate, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    const after = applyBurnFactorReforecastAfterValidation(contract, "F01");
+
+    // F02 estimate should be scaled to 0.020
+    const f02 = after.features.find((f) => f.id === "F02")!;
+    expect(f02.estimate.high).toBeCloseTo(highEstimate * (actualSpend / highEstimate), 5);
+    // State should be COMPRESS (UNSAFE + pending features)
+    expect(after.state).toBe("COMPRESS");
+  });
+
+  test("applyBurnFactorReforecast: guard prevents double-apply via burnFactorApplied flag", () => {
+    const highEstimate = 2;
+    const actualSpend  = 4;
+    const contract = makeContract({
+      features: [
+        makeFeature({ id: "f1", status: "done", estimate: { low: 1, high: highEstimate, confidence: "medium" }, actualSpent: actualSpend }),
+        makeFeature({ id: "f2", status: "pending", estimate: { low: 1, high: 2, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    const after1 = applyBurnFactorReforecast(contract, "f1", actualSpend);
+    const f2After1 = after1.features.find((f) => f.id === "f2")!;
+
+    // Second call must be a no-op because burnFactorApplied = true
+    const after2 = applyBurnFactorReforecast(after1, "f1", actualSpend);
+    const f2After2 = after2.features.find((f) => f.id === "f2")!;
+    expect(f2After2.estimate.high).toBeCloseTo(f2After1.estimate.high, 8);
+  });
+
+  test("COMPRESS blocks new runs — nextProjectState returns COMPRESS when UNSAFE + pending", () => {
+    const contract = makeContract({
+      features: [makeFeature({ status: "pending" })],
+    });
+    expect(nextProjectState(contract, "UNSAFE")).toBe("COMPRESS");
+  });
+
+  test("deferring optional feature can restore affordability", () => {
+    // F02 + F03 together = 0.040 forecast high, spendable = 0.025 → UNSAFE (ratio 1.6)
+    // Defer F03 (could) → only F02 remains = 0.020 < 0.025 spendable → TIGHT (ratio 0.8)
+    // assignedBudget=0.075, actualSpent=0.020, reserves=0.030
+    // remaining = 0.055, spendable = 0.025
+    const contract = makeContract({
+      currentWindow: makeWindow({ assignedBudget: 0.075, actualSpent: 0.020 }),
+      reserves: makeReserves({ validation: 0.010, repair: 0.010, integration: 0.010 }),
+      features: [
+        makeFeature({ id: "F02", status: "pending", priority: "must",  estimate: { low: 0.010, high: 0.020, confidence: "medium" }, actualSpent: 0 }),
+        makeFeature({ id: "F03", status: "pending", priority: "could", estimate: { low: 0.010, high: 0.020, confidence: "medium" }, actualSpent: 0 }),
+      ],
+    });
+
+    // Before defer: F02+F03 forecast high = 0.040 > spendable 0.025 → UNSAFE
+    expect(computeRiskState(contract)).toBe("UNSAFE");
+    expect(nextProjectState(contract, "UNSAFE")).toBe("COMPRESS");
+
+    // Defer F03
+    const after = deferFeature(contract, "F03");
+
+    // Now only F02 high = 0.020, spendable = 0.025 → ratio = 0.8 → TIGHT (not UNSAFE)
+    const riskAfter = computeRiskState(after);
+    expect(riskAfter).not.toBe("UNSAFE");
+    // State should allow F02 to be run (BUILD/TIGHT — not COMPRESS)
+    expect(nextProjectState(after, riskAfter)).not.toBe("COMPRESS");
+    // F03 remains deferred
+    expect(after.features.find((f) => f.id === "F03")!.status).toBe("deferred");
+  });
+
+  test("optional deferred feature stays deferred after F02 completes", () => {
+    const contract = makeContract({
+      features: [
+        makeFeature({ id: "F02", status: "done",     priority: "must",  estimate: { low: 0.010, high: 0.020, confidence: "medium" }, actualSpent: 0.020 }),
+        makeFeature({ id: "F03", status: "deferred", priority: "could", estimate: { low: 0.010, high: 0.020, confidence: "medium" }, actualSpent: 0 }),
+      ],
+      deferredFeatureIds: ["F03"],
+    });
+
+    // Confirm state stays LAND (all non-deferred done)
+    const state = nextProjectState(contract, "SAFE");
+    expect(state).toBe("LAND");
+    expect(contract.features.find((f) => f.id === "F03")!.status).toBe("deferred");
   });
 });
