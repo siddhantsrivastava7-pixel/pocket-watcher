@@ -1,17 +1,38 @@
 {
   "name": "pocket-watcher",
-  "version": "0.1.0",
-  "description": "Budget-aware execution governor for coding agents",
+  "version": "0.1.0-hackathon.1",
+  "description": "Make your coding agent finish before your compute budget does. Budget-aware execution governor for Bob and coding agents.",
   "type": "module",
-  "main": "dist/index.js",
   "bin": {
     "pocket": "dist/cli.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.15"
   },
   "scripts": {
     "build": "tsc",
     "test": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern='src/__tests__'",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "pack:verify": "npm pack --dry-run"
   },
+  "keywords": [
+    "pocket-watcher",
+    "budget",
+    "compute",
+    "coding-agent",
+    "bob",
+    "bobcoin",
+    "ai-agent",
+    "cost-control",
+    "scope-management"
+  ],
+  "license": "MIT",
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "@types/node": "^22.10.0",

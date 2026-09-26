@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment / credentials — NEVER commit
+.env
+.env.local
+.env.*
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# npm pack artifacts
+*.tgz
+
+# Temporary test fixtures
+/tmp/

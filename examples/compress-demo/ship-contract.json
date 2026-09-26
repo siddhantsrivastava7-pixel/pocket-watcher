@@ -1,0 +1,115 @@
+{
+  "_comment": "Pocket Watcher COMPRESS demo — matches the observed compress proof fixture.",
+  "_note": "actualSpent values reset to 0 for fresh replay. Real observed values: F01=0.019952, F02=0.019956.",
+  "projectId": "compress-demo-fixture-001",
+  "createdAt": "2025-09-01T00:00:00.000Z",
+  "updatedAt": "2025-09-01T00:00:00.000Z",
+  "currentWindow": {
+    "windowId": 1,
+    "provider": "bob",
+    "unit": "bobcoin",
+    "budgetMode": "custom",
+    "providerRemainingAtStart": null,
+    "assignedBudget": 0.09,
+    "actualSpent": 0,
+    "remainingAssignedBudget": 0.09,
+    "createdAt": "2025-09-01T00:00:00.000Z",
+    "closedAt": null
+  },
+  "previousWindows": [],
+  "reserves": {
+    "validation": 0.015,
+    "repair": 0.015,
+    "integration": 0.01
+  },
+  "phaseAllocation": {
+    "planning": 0.0025,
+    "implementation": 0.035,
+    "integration": 0.01,
+    "validation": 0.015,
+    "repairLanding": 0.015
+  },
+  "overshootGuard": 0.01,
+  "features": [
+    {
+      "id": "F01",
+      "name": "Write hello file",
+      "goal": "Create hello.txt containing exactly the text: Hello, COMPRESS!",
+      "dependencies": [],
+      "priority": "must",
+      "estimate": { "low": 0.01, "high": 0.015, "confidence": "medium" },
+      "acceptance": [
+        "hello.txt exists in the workspace",
+        "hello.txt contains exactly: Hello, COMPRESS!"
+      ],
+      "excluded": [],
+      "status": "pending",
+      "actualSpent": 0,
+      "windowId": 1,
+      "validation": {
+        "commands": [
+          "test -f hello.txt",
+          "grep -qF 'Hello, COMPRESS!' hello.txt"
+        ]
+      }
+    },
+    {
+      "id": "F02",
+      "name": "Write counter file",
+      "goal": "Create counter.txt containing exactly the number: 99",
+      "dependencies": [],
+      "priority": "must",
+      "estimate": { "low": 0.01, "high": 0.015, "confidence": "medium" },
+      "acceptance": [
+        "counter.txt exists in the workspace",
+        "counter.txt contains: 99"
+      ],
+      "excluded": [],
+      "status": "pending",
+      "actualSpent": 0,
+      "windowId": 1,
+      "validation": {
+        "commands": [
+          "test -f counter.txt",
+          "grep -qF '99' counter.txt"
+        ]
+      }
+    },
+    {
+      "id": "F03",
+      "name": "Optional summary file",
+      "goal": "Create summary.txt with a one-line project summary",
+      "dependencies": [],
+      "priority": "could",
+      "estimate": { "low": 0.01, "high": 0.015, "confidence": "medium" },
+      "acceptance": [
+        "summary.txt exists in the workspace"
+      ],
+      "excluded": [],
+      "status": "pending",
+      "actualSpent": 0,
+      "windowId": 1,
+      "validation": {
+        "commands": [
+          "test -f summary.txt"
+        ]
+      }
+    }
+  ],
+  "deferredFeatureIds": [],
+  "activeFeatureId": null,
+  "forecast": {
+    "remainingHighBC": 0.045,
+    "remainingLowBC": 0.03,
+    "riskState": "TIGHT"
+  },
+  "state": "BUILD",
+  "projectValidation": {
+    "commands": [
+      "test -f hello.txt",
+      "test -f counter.txt",
+      "grep -qF 'Hello, COMPRESS!' hello.txt",
+      "grep -qF '99' counter.txt"
+    ]
+  }
+}

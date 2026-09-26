@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * Pocket Watcher CLI — V1 + packaging
+ * Pocket Watcher CLI
+ *
+ * Make your coding agent finish before your compute budget does.
  *
  * Commands:
  *   pocket init [--budget <n>]
@@ -24,6 +26,278 @@ import { totalReserve, spendableBudget, computeRiskState, canStartFeature, canRe
 import { runWithBudget, buildFeaturePrompt, buildRepairPrompt } from "./runner.js";
 import { validateFeature, validateProject } from "./validation.js";
 import { installSkill } from "./install.js";
+// ---------------------------------------------------------------------------
+// Help text
+// ---------------------------------------------------------------------------
+function printHelp() {
+    console.log(`
+Pocket Watcher — Make your coding agent finish before your compute budget does.
+
+USAGE
+  pocket <command> [options]
+
+COMMANDS
+  init [--budget <n>]          Start a compute window using your available Bob usage.
+                               --budget <n>  Give this project a custom <n>-Bobcoin envelope.
+                               Example: pocket init --budget 10
+
+  scope "<request>"            Decompose your request into budgeted features.
+                               Runs a single Bob planning call, then presents the feature list.
+                               Scope that does not fit is flagged immediately.
+
+  status                       See what can still safely ship inside the current envelope.
+                               Shows: assigned compute, spent, remaining, risk, state, features.
+
+  run <feature-id>             Execute one feature within its allocated wallet.
+                               Bob is bounded by --max-cost. Actual cost recorded on completion.
+
+  validate <feature-id>        Check that a feature's acceptance criteria pass (zero Bobcoins).
+                               Runs shell commands — no AI calls, no cost.
+  validate --all               Validate every eligible feature at once.
+
+  check                        Run project-level finishing validation (zero Bobcoins).
+                               Confirms the whole project meets its acceptance criteria.
+
+  repair <feature-id>          Re-run a failed or interrupted feature using the repair reserve.
+                               Funded from the protected repair budget, not feature wallets.
+
+  defer <feature-id>           Drop a feature from the active scope to free budget.
+                               Use during COMPRESS to restore SAFE state.
+
+  land                         Enter LAND mode: ship what exists, no new features.
+                               Protects the finishing reserve for validation and repair only.
+
+  resume [--budget <n>]        Open a new compute window after a quota reset.
+                               Carries forward all feature state from the previous window.
+
+  install bob [--global|--project]
+                               Install the /pocket-watcher Bob Skill.
+                               --global   Available in all workspaces (writes to ~/.bob/skills)
+                               --project  Available in this workspace only (writes to .bob/skills)
+
+STATES
+  SCOPE     Defining features, no spending yet.
+  BUILD     Executing features within budget.
+  COMPRESS  Over budget — defer optional features before continuing.
+  LAND      Finishing reserve is low — validate and repair only, no new scope.
+  SHIPPED   Done.
+
+RISK
+  ✅ SAFE    Remaining forecast < 80% of spendable.
+  ⚠️  TIGHT   80–100% of spendable.
+  🚨 UNSAFE  Forecast exceeds spendable budget.
+
+QUICK START
+  pocket init --budget 10
+  pocket scope "Build a CLI tool that does X"
+  pocket status
+  pocket run F01
+  pocket validate F01
+  pocket check
+  pocket land
+`);
+}
+function printCommandHelp(cmd) {
+    switch (cmd) {
+        case "init":
+            console.log(`
+pocket init [--budget <n>]
+
+  Start a compute window using your available Bob usage.
+
+  Without --budget, Pocket Watcher will ask how many Bobcoins you have remaining.
+  With --budget, you set a fixed project cap regardless of your total account balance.
+  The budget cap is enforced — it will never increase automatically.
+
+  After init, a protected finishing reserve is set aside. Feature wallets come from
+  the remainder (spendable budget).
+
+  Examples:
+    pocket init                 Ask for your current balance, use it all
+    pocket init --budget 10     Cap this project at 10 Bobcoins
+    pocket init --budget 0.5    Cap this project at 0.5 Bobcoins (useful for demos)
+`);
+            break;
+        case "scope":
+            console.log(`
+pocket scope "<request>"
+
+  Decompose your request into budgeted features.
+
+  Runs a single Bob planning call, then presents the candidate feature list with
+  priority, estimates, and acceptance criteria. Features that do not fit in the
+  safe envelope are flagged at once — you choose which outcomes are essential.
+
+  Features are assigned: must / should / could priority.
+  Deferred features are tracked but not budgeted.
+
+  Example:
+    pocket scope "Build a REST API with auth and a health check endpoint"
+`);
+            break;
+        case "status":
+            console.log(`
+pocket status
+
+  Show what can still safely ship inside the current compute envelope.
+
+  Displays:
+    - Assigned compute and how much is left
+    - Protected reserve (for validation, repair, integration)
+    - Flexible spendable remaining
+    - Remaining forecast (low–high)
+    - Risk: SAFE / TIGHT / UNSAFE
+    - Project state: BUILD / COMPRESS / LAND
+    - Each feature with status and actual spend
+
+  No Bobcoins consumed. Safe to run at any time.
+`);
+            break;
+        case "run":
+            console.log(`
+pocket run <feature-id>
+
+  Execute one feature within its allocated wallet.
+
+  Bob is invoked with --max-cost set to the feature wallet minus the overshoot guard.
+  Actual cost is recorded from Bob's session_costs output. The budget is updated
+  immediately. Deterministic validation runs automatically after a normal completion.
+
+  Cost limit hit ≠ feature complete. Pocket Watcher only marks a feature done
+  after its acceptance criteria pass — not from Bob's exit code.
+
+  Example:
+    pocket run F01
+`);
+            break;
+        case "validate":
+            console.log(`
+pocket validate <feature-id>
+pocket validate --all
+
+  Check that a feature's acceptance criteria pass. Zero Bobcoins consumed.
+
+  Runs the shell commands configured in the feature's validation block.
+  No AI calls. No compute cost. Results are deterministic.
+
+  If validation passes, the feature is marked done.
+  If validation fails, the feature is marked validation_failed.
+  Use 'pocket repair <id>' to fix failures.
+
+  Examples:
+    pocket validate F01
+    pocket validate --all
+`);
+            break;
+        case "check":
+            console.log(`
+pocket check
+
+  Run project-level finishing validation. Zero Bobcoins consumed.
+
+  Runs the shell commands configured in projectValidation.commands.
+  Confirms the whole project meets its acceptance criteria (e.g. build passes,
+  key files exist, tests pass).
+
+  No AI calls. Deterministic. Safe to run multiple times.
+`);
+            break;
+        case "repair":
+            console.log(`
+pocket repair <feature-id>
+
+  Re-run a failed or interrupted feature using the protected repair reserve.
+
+  Eligible statuses: validation_failed, budget_interrupted, awaiting_validation.
+
+  Repair spend is charged to the repair reserve — not to the feature's wallet
+  and not to the flexible spendable budget. The reserve is fixed at init time.
+  Repair cannot exceed the remaining repair reserve.
+
+  After the repair run, deterministic validation is re-attempted automatically.
+
+  Example:
+    pocket repair F01
+`);
+            break;
+        case "defer":
+            console.log(`
+pocket defer <feature-id>
+
+  Drop a feature from active scope to free budget. Use during COMPRESS.
+
+  Deferred features are not removed — they are tracked for potential revival
+  in a future compute window. Deferring an optional feature can restore SAFE
+  state and allow remaining must-ship features to proceed.
+
+  Example:
+    pocket defer F03
+`);
+            break;
+        case "land":
+            console.log(`
+pocket land
+
+  Enter LAND mode: finish what exists, no new features.
+
+  LAND is the final phase before shipping. It protects the finishing reserve
+  for validation and repair only. No new pending features may be started.
+
+  LAND allows:
+    pocket validate / pocket validate --all
+    pocket check
+    pocket repair <id>   (for failed must-ship features)
+    Critical build / typecheck / test fixes
+
+  LAND blocks:
+    New pending product features
+    Optional or deferred features
+    Speculative refactors and cleanup
+`);
+            break;
+        case "resume":
+            console.log(`
+pocket resume [--budget <n>]
+
+  Open a new compute window after a quota reset.
+
+  Carries forward all feature state (done/pending/deferred) from previous windows.
+  Previous window data is preserved as immutable history.
+
+  Without --budget, asks for your new balance.
+  With --budget, sets a fixed cap for the new window.
+
+  Example:
+    pocket resume
+    pocket resume --budget 5
+`);
+            break;
+        case "install":
+            console.log(`
+pocket install bob [--global|--project]
+
+  Install the /pocket-watcher Bob Skill.
+
+  The Bob Skill is the conversational front door for Pocket Watcher.
+  Once installed, invoke it from any Bob workspace with:
+
+    /pocket-watcher
+
+  --global   Install for all Bob workspaces (writes to ~/.bob/skills/pocket-watcher/)
+  --project  Install for this workspace only (writes to .bob/skills/pocket-watcher/)
+
+  Safe to re-run — reinstall updates SKILL.md to the latest version.
+  Will not overwrite an unrelated skill file.
+
+  Examples:
+    pocket install bob --global
+    pocket install bob --project
+`);
+            break;
+        default:
+            printHelp();
+    }
+}
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
@@ -362,56 +636,77 @@ async function cmdStatus() {
     const reserve = totalReserve(contract.reserves);
     const risk = computeRiskState(contract);
     const forecast = contract.forecast;
-    console.log(`\nPOCKET WATCHER`);
-    console.log(`══════════════`);
-    console.log(`Provider   : Bob`);
-    console.log(`Unit       : Bobcoin`);
-    console.log(``);
-    console.log(`Compute window #${cw.windowId}`);
-    console.log(`  Mode              : ${cw.budgetMode.toUpperCase()}`);
-    if (cw.providerRemainingAtStart !== null) {
-        console.log(`  Provider available: ${bc(cw.providerRemainingAtStart)}`);
-    }
-    if (cw.budgetMode === "custom") {
-        console.log(`  Project cap       : ${bc(cw.assignedBudget)}`);
-        console.log(`  Project remaining : ${bc(cw.remainingAssignedBudget)}`);
-    }
-    else {
-        console.log(`  Assigned          : ${bc(cw.assignedBudget)}`);
-        console.log(`  Spent             : ${bc(cw.actualSpent)}`);
-        console.log(`  Remaining         : ${bc(cw.remainingAssignedBudget)}`);
-    }
-    console.log(``);
-    console.log(`  Protected landing : ${bc(reserve)}`);
-    console.log(`  Flexible spendable: ${bc(spendable)}`);
-    console.log(``);
-    console.log(`Remaining forecast  : ${bc(forecast.remainingLowBC)}–${bc(forecast.remainingHighBC)}`);
-    console.log(`Risk                : ${riskBadge(risk)}`);
-    console.log(`State               : ${contract.state}`);
-    if (contract.features.length > 0) {
-        console.log(``);
-        console.log(`Ship Contract:`);
-        for (const f of contract.features) {
-            if (f.status === "deferred")
-                continue;
-            const icon = featureStatusIcon(f.status);
-            const spentStr = f.actualSpent > 0 ? `  actual ${bc(f.actualSpent)}` : `  wallet ~${bc(f.estimate.high)}`;
-            console.log(`  ${icon} ${f.id} ${f.name}${spentStr}`);
+    const stateLabel = (s) => {
+        switch (s) {
+            case "BUILD": return "BUILD     — executing features";
+            case "COMPRESS": return "COMPRESS  — scope reduction required";
+            case "LAND": return "LAND      — finishing only, no new features";
+            case "SCOPE": return "SCOPE     — defining features";
+            case "SHIPPED": return "SHIPPED   — done";
+            default: return s;
         }
+    };
+    console.log(`\nPOCKET WATCHER`);
+    console.log(`══════════════════════════════════════`);
+    console.log(`  State    : ${stateLabel(contract.state)}`);
+    console.log(`  Risk     : ${riskBadge(risk)}`);
+    console.log();
+    console.log(`  BUDGET (Window #${cw.windowId}${cw.budgetMode === "custom" ? " — custom cap" : ""})`);
+    console.log(`  ──────────────────────────────────`);
+    console.log(`  Assigned compute    : ${bc(cw.assignedBudget)}`);
+    console.log(`  Actual spent        : ${bc(cw.actualSpent)}`);
+    console.log(`  Remaining           : ${bc(cw.remainingAssignedBudget)}`);
+    console.log(`  Protected reserve   : ${bc(reserve)}  (validation + repair + integration)`);
+    console.log(`  Flexible spendable  : ${bc(spendable)}`);
+    console.log(`  Remaining forecast  : ${bc(forecast.remainingLowBC)}–${bc(forecast.remainingHighBC)}`);
+    if (contract.features.length > 0) {
+        const done = contract.features.filter((f) => f.status === "done");
+        const active = contract.features.filter((f) => f.id === contract.activeFeatureId && f.status === "running");
+        const pending = contract.features.filter((f) => f.status === "pending");
+        const problem = contract.features.filter((f) => f.status === "validation_failed" || f.status === "budget_interrupted" || f.status === "awaiting_validation");
         const deferred = contract.features.filter((f) => f.status === "deferred");
+        console.log();
+        console.log(`  FEATURES`);
+        console.log(`  ──────────────────────────────────`);
+        if (done.length > 0) {
+            for (const f of done) {
+                console.log(`  ✓  ${f.id.padEnd(6)} ${f.name}  (${bc(f.actualSpent)})`);
+            }
+        }
+        if (active.length > 0) {
+            for (const f of active) {
+                console.log(`  ▶  ${f.id.padEnd(6)} ${f.name}  (running)`);
+            }
+        }
+        if (pending.length > 0) {
+            for (const f of pending) {
+                console.log(`  ○  ${f.id.padEnd(6)} ${f.name}  (est ~${bc(f.estimate.high)})`);
+            }
+        }
+        if (problem.length > 0) {
+            for (const f of problem) {
+                const icon = featureStatusIcon(f.status);
+                const hint = f.status === "awaiting_validation"
+                    ? "needs validation"
+                    : f.status === "budget_interrupted"
+                        ? "budget hit — run validate or repair"
+                        : "failed — run repair";
+                console.log(`  ${icon}  ${f.id.padEnd(6)} ${f.name}  (${hint})`);
+            }
+        }
         if (deferred.length > 0) {
-            console.log(``);
-            console.log(`Deferred:`);
+            console.log();
+            console.log(`  DEFERRED (out of scope)`);
             for (const f of deferred) {
-                console.log(`  - ${f.id}: ${f.name}`);
+                console.log(`  ⏸  ${f.id.padEnd(6)} ${f.name}`);
             }
         }
     }
     if (contract.previousWindows.length > 0) {
-        console.log(``);
-        console.log(`Previous windows:`);
+        console.log();
+        console.log(`  PREVIOUS WINDOWS`);
         for (const w of contract.previousWindows) {
-            console.log(`  Window #${w.windowId}: assigned ${bc(w.assignedBudget)} spent ${bc(w.actualSpent)}`);
+            console.log(`  Window #${w.windowId}: assigned ${bc(w.assignedBudget)}  spent ${bc(w.actualSpent)}`);
         }
     }
     console.log();
@@ -1014,6 +1309,16 @@ async function cmdInstall(args) {
 // ---------------------------------------------------------------------------
 const [, , command, ...rest] = argv;
 async function main() {
+    // Global --help / -h
+    if (command === "--help" || command === "-h" || command === "help") {
+        printHelp();
+        return;
+    }
+    // Per-command --help (handles both `pocket status --help` and `pocket install bob --help`)
+    if (rest.includes("--help") || rest.includes("-h")) {
+        printCommandHelp(command ?? "");
+        return;
+    }
     switch (command) {
         case "init":
             await cmdInit(rest);
@@ -1027,7 +1332,7 @@ async function main() {
         case "run": {
             const featureId = rest[0];
             if (!featureId) {
-                console.error("Usage: pocket run <feature-id>");
+                printCommandHelp("run");
                 exit(1);
             }
             await cmdRun(featureId);
@@ -1042,7 +1347,7 @@ async function main() {
         case "repair": {
             const featureId = rest[0];
             if (!featureId) {
-                console.error("Usage: pocket repair <feature-id>");
+                printCommandHelp("repair");
                 exit(1);
             }
             await cmdRepair(featureId);
@@ -1051,7 +1356,7 @@ async function main() {
         case "defer": {
             const featureId = rest[0];
             if (!featureId) {
-                console.error("Usage: pocket defer <feature-id>");
+                printCommandHelp("defer");
                 exit(1);
             }
             await cmdDefer(featureId);
@@ -1067,18 +1372,7 @@ async function main() {
             await cmdInstall(rest);
             break;
         default:
-            console.log("Usage:");
-            console.log("  pocket init [--budget <n>]");
-            console.log("  pocket scope \"<request>\"");
-            console.log("  pocket status");
-            console.log("  pocket run <feature-id>");
-            console.log("  pocket validate <feature-id> | --all");
-            console.log("  pocket check");
-            console.log("  pocket repair <feature-id>");
-            console.log("  pocket defer <feature-id>");
-            console.log("  pocket land");
-            console.log("  pocket resume [--budget <n>]");
-            console.log("  pocket install bob [--global|--project]");
+            printHelp();
             exit(1);
     }
 }

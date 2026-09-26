@@ -1,0 +1,36 @@
+# Source — not needed in published package
+src/
+
+# Test artifacts
+src/__tests__/
+jest.config.json
+
+# TypeScript config (not needed at runtime)
+tsconfig.json
+
+# Development
+.env
+.env.local
+.env.*
+
+# Bob sessions and task evidence (heavy, dev-only)
+bob_sessions/
+tasks/
+docs/
+
+# Examples
+examples/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Git
+.git/
+.gitignore
+
+# Dist source maps (keep .js and .d.ts, drop maps to shrink package)
+dist/**/*.js.map

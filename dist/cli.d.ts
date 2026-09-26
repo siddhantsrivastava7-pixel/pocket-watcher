@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * Pocket Watcher CLI — V1 + packaging
+ * Pocket Watcher CLI
+ *
+ * Make your coding agent finish before your compute budget does.
  *
  * Commands:
  *   pocket init [--budget <n>]
