@@ -13,6 +13,24 @@
  */
 import { spawn } from "node:child_process";
 // ---------------------------------------------------------------------------
+// Executable resolution
+// ---------------------------------------------------------------------------
+/**
+ * Return the Bob executable name for the current platform.
+ *
+ * On Windows, npm installs CLI tools as both a bare script (no extension) and
+ * a `.cmd` shim. Node's `spawn` without `shell:true` only finds the `.cmd`
+ * shim on Windows because it searches PATH for exact file names — the bare
+ * name "bob" without an extension is not an executable file on Windows.
+ *
+ * On macOS / Linux, "bob" resolves normally via PATH.
+ *
+ * Exported so tests can assert the resolution logic without invoking Bob.
+ */
+export function resolveBobExecutable() {
+    return process.platform === "win32" ? "bob.cmd" : "bob";
+}
+// ---------------------------------------------------------------------------
 // Narrow prompt builder
 // ---------------------------------------------------------------------------
 /**
@@ -115,7 +133,7 @@ export async function runWithBudget(prompt, maxCost, extraArgs = []) {
         prompt,
     ];
     return new Promise((resolve, reject) => {
-        const child = spawn("bob", args, {
+        const child = spawn(resolveBobExecutable(), args, {
             env: { ...process.env, BOB_API_KEY: apiKey },
             // stdin closed (ignore), capture stdout + stderr
             stdio: ["ignore", "pipe", "pipe"],

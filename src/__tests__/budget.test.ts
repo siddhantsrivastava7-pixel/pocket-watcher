@@ -41,7 +41,7 @@ import {
   PLANNING_BUDGET_MAX,
   windowRemaining,
 } from "../budget.js";
-import { buildFeaturePrompt, buildRepairPrompt } from "../runner.js";
+import { buildFeaturePrompt, buildRepairPrompt, resolveBobExecutable } from "../runner.js";
 import { runValidationCommand, validateFeature, validateProject } from "../validation.js";
 import {
   globalSkillsDir,
@@ -794,6 +794,39 @@ describe("runner — cost limit detection via output parsing", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bob executable resolution — cross-platform
+// ---------------------------------------------------------------------------
+
+describe("resolveBobExecutable — platform-dependent executable name", () => {
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    // Restore the real platform descriptor after each test
+    Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+  });
+
+  test("returns 'bob.cmd' on win32", () => {
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    expect(resolveBobExecutable()).toBe("bob.cmd");
+  });
+
+  test("returns 'bob' on darwin", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+    expect(resolveBobExecutable()).toBe("bob");
+  });
+
+  test("returns 'bob' on linux", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    expect(resolveBobExecutable()).toBe("bob");
+  });
+
+  test("returns 'bob' on any other non-win32 platform", () => {
+    Object.defineProperty(process, "platform", { value: "freebsd", configurable: true });
+    expect(resolveBobExecutable()).toBe("bob");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FEATURE WALLET + OVERSHOOT GUARD (V1)
 // ---------------------------------------------------------------------------
 
@@ -1066,7 +1099,7 @@ describe("Bob Skill install — path generation", () => {
   });
 
   test("projectSkillsDir returns path under given cwd", () => {
-    const cwd = "/tmp/my-project";
+    const cwd = path.join(os.tmpdir(), "my-project");
     const dir = projectSkillsDir(cwd);
     expect(dir).toBe(path.join(cwd, ".bob", "skills"));
   });
