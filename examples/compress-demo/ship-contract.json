@@ -48,8 +48,8 @@
       "windowId": 1,
       "validation": {
         "commands": [
-          "test -f hello.txt",
-          "grep -qF 'Hello, COMPRESS!' hello.txt"
+          "node -e \"const fs=require('fs');try{fs.accessSync('hello.txt')}catch(e){process.exit(1)}\"",
+          "node -e \"const fs=require('fs');const c=fs.readFileSync('hello.txt','utf8');if(!c.includes('Hello, COMPRESS!'))process.exit(1)\""
         ]
       }
     },
@@ -70,8 +70,8 @@
       "windowId": 1,
       "validation": {
         "commands": [
-          "test -f counter.txt",
-          "grep -qF '99' counter.txt"
+          "node -e \"const fs=require('fs');try{fs.accessSync('counter.txt')}catch(e){process.exit(1)}\"",
+          "node -e \"const fs=require('fs');const c=fs.readFileSync('counter.txt','utf8');if(!c.includes('99'))process.exit(1)\""
         ]
       }
     },
@@ -91,7 +91,7 @@
       "windowId": 1,
       "validation": {
         "commands": [
-          "test -f summary.txt"
+          "node -e \"const fs=require('fs');try{fs.accessSync('summary.txt')}catch(e){process.exit(1)}\""
         ]
       }
     }
@@ -106,10 +106,10 @@
   "state": "BUILD",
   "projectValidation": {
     "commands": [
-      "test -f hello.txt",
-      "test -f counter.txt",
-      "grep -qF 'Hello, COMPRESS!' hello.txt",
-      "grep -qF '99' counter.txt"
+      "node -e \"const fs=require('fs');try{fs.accessSync('hello.txt')}catch(e){process.exit(1)}\"",
+      "node -e \"const fs=require('fs');try{fs.accessSync('counter.txt')}catch(e){process.exit(1)}\"",
+      "node -e \"const fs=require('fs');const c=fs.readFileSync('hello.txt','utf8');if(!c.includes('Hello, COMPRESS!'))process.exit(1)\"",
+      "node -e \"const fs=require('fs');const c=fs.readFileSync('counter.txt','utf8');if(!c.includes('99'))process.exit(1)\""
     ]
   }
 }

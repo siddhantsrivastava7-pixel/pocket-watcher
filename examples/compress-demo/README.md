@@ -47,21 +47,24 @@ SHIPPED: hello.txt + counter.txt delivered, summary.txt deferred
 
 | ID  | Name                  | Priority | Est high | Validation |
 |-----|-----------------------|----------|----------|------------|
-| F01 | Write hello file      | must     | 0.015 BC | `test -f hello.txt` + `grep -qF 'Hello, COMPRESS!' hello.txt` |
-| F02 | Write counter file    | must     | 0.015 BC | `test -f counter.txt` + `grep -qF '99' counter.txt` |
-| F03 | Optional summary file | could    | 0.015 BC | `test -f summary.txt` |
+| F01 | Write hello file      | must     | 0.015 BC | file exists + contains `Hello, COMPRESS!` |
+| F02 | Write counter file    | must     | 0.015 BC | file exists + contains `99` |
+| F03 | Optional summary file | could    | 0.015 BC | file exists |
 
 Estimates are deliberately below actual Bob turn cost (~0.020 BC).
 This is by design — it forces the budget-exceeded path and COMPRESS behavior.
 
 ### Project-level validation
 
-```
-test -f hello.txt
-test -f counter.txt
-grep -qF 'Hello, COMPRESS!' hello.txt
-grep -qF '99' counter.txt
-```
+4 commands (cross-platform `node -e`):
+
+1. `hello.txt` exists
+2. `counter.txt` exists
+3. `hello.txt` contains `Hello, COMPRESS!`
+4. `counter.txt` contains `99`
+
+All commands use `node -e` with `fs.accessSync` / `fs.readFileSync` so they work on
+Windows, macOS, and Linux without requiring `sh`, `test`, or `grep`.
 
 ---
 
@@ -70,12 +73,29 @@ grep -qF '99' counter.txt
 The demo uses [`ship-contract.json`](./ship-contract.json) — a pre-built Pocket Watcher
 contract that matches the observed COMPRESS proof exactly.
 
-You can load this into a fresh workspace to reproduce the scenario:
+You can load this into a fresh workspace to reproduce the scenario.
 
+**macOS / Linux:**
 ```sh
 mkdir /tmp/compress-demo && cd /tmp/compress-demo
+mkdir -p .pocket
 cp /path/to/pocket-watcher/examples/compress-demo/ship-contract.json .pocket/ship-contract.json
 BOB_API_KEY=your_key pocket run F01
+pocket validate F01
+pocket run F02          # ← will be blocked: COMPRESS
+pocket defer F03
+pocket run F02
+pocket validate F02
+pocket land
+pocket check
+```
+
+**Windows (PowerShell):**
+```powershell
+New-Item -ItemType Directory -Path "$env:TEMP\compress-demo\.pocket" -Force
+cd "$env:TEMP\compress-demo"
+Copy-Item \path\to\pocket-watcher\examples\compress-demo\ship-contract.json .pocket\ship-contract.json
+$env:BOB_API_KEY="your_key"; pocket run F01
 pocket validate F01
 pocket run F02          # ← will be blocked: COMPRESS
 pocket defer F03
