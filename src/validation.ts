@@ -16,27 +16,6 @@ import type {
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
-// Cross-platform shell selection
-// ---------------------------------------------------------------------------
-
-/**
- * Returns the shell executable and argument prefix for the current platform.
- *
- * Windows: cmd.exe /d /s /c  (cmd /d disables AutoRun, /s /c enable correct
- *          quoting and single-argument command-string execution)
- * POSIX:   /bin/sh -c
- */
-function shellArgs(command: string): { shell: string; args: string[] } {
-  if (process.platform === "win32") {
-    return {
-      shell: process.env["ComSpec"] ?? "cmd.exe",
-      args: ["/d", "/s", "/c", command],
-    };
-  }
-  return { shell: "/bin/sh", args: ["-c", command] };
-}
-
-// ---------------------------------------------------------------------------
 // Run a single command deterministically
 // ---------------------------------------------------------------------------
 
@@ -44,8 +23,10 @@ function shellArgs(command: string): { shell: string; args: string[] } {
  * Run a single shell command and capture result.
  * Does not invoke Bob. Costs zero Bobcoins.
  *
- * On Windows, commands are executed via cmd.exe /d /s /c.
- * On macOS/Linux, commands are executed via /bin/sh -c.
+ * Uses Node's built-in `shell` spawn option so that the platform's default
+ * shell handles argument quoting and exit-code propagation correctly:
+ *   Windows  →  process.env.ComSpec ?? "cmd.exe"
+ *   POSIX    →  /bin/sh
  *
  * @param command  The command string to run via the platform shell
  * @param cwd      Working directory (defaults to process.cwd())
@@ -60,9 +41,12 @@ export async function runValidationCommand(
     let stdout = "";
     let stderr = "";
 
-    const { shell, args } = shellArgs(command);
-    const child = spawn(shell, args, {
+    const child = spawn(command, {
       cwd,
+      shell:
+        process.platform === "win32"
+          ? (process.env["ComSpec"] ?? "cmd.exe")
+          : "/bin/sh",
       stdio: ["ignore", "pipe", "pipe"],
     });
 

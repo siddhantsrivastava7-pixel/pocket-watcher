@@ -11,8 +11,10 @@ import type { Feature, ValidationCommandResult, ValidationResult, ProjectValidat
  * Run a single shell command and capture result.
  * Does not invoke Bob. Costs zero Bobcoins.
  *
- * On Windows, commands are executed via cmd.exe /d /s /c.
- * On macOS/Linux, commands are executed via /bin/sh -c.
+ * Uses Node's built-in `shell` spawn option so that the platform's default
+ * shell handles argument quoting and exit-code propagation correctly:
+ *   Windows  →  process.env.ComSpec ?? "cmd.exe"
+ *   POSIX    →  /bin/sh
  *
  * @param command  The command string to run via the platform shell
  * @param cwd      Working directory (defaults to process.cwd())

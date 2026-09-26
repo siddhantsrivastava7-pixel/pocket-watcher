@@ -8,33 +8,16 @@
  */
 import { spawn } from "node:child_process";
 // ---------------------------------------------------------------------------
-// Cross-platform shell selection
-// ---------------------------------------------------------------------------
-/**
- * Returns the shell executable and argument prefix for the current platform.
- *
- * Windows: cmd.exe /d /s /c  (cmd /d disables AutoRun, /s /c enable correct
- *          quoting and single-argument command-string execution)
- * POSIX:   /bin/sh -c
- */
-function shellArgs(command) {
-    if (process.platform === "win32") {
-        return {
-            shell: process.env["ComSpec"] ?? "cmd.exe",
-            args: ["/d", "/s", "/c", command],
-        };
-    }
-    return { shell: "/bin/sh", args: ["-c", command] };
-}
-// ---------------------------------------------------------------------------
 // Run a single command deterministically
 // ---------------------------------------------------------------------------
 /**
  * Run a single shell command and capture result.
  * Does not invoke Bob. Costs zero Bobcoins.
  *
- * On Windows, commands are executed via cmd.exe /d /s /c.
- * On macOS/Linux, commands are executed via /bin/sh -c.
+ * Uses Node's built-in `shell` spawn option so that the platform's default
+ * shell handles argument quoting and exit-code propagation correctly:
+ *   Windows  →  process.env.ComSpec ?? "cmd.exe"
+ *   POSIX    →  /bin/sh
  *
  * @param command  The command string to run via the platform shell
  * @param cwd      Working directory (defaults to process.cwd())
@@ -44,9 +27,11 @@ export async function runValidationCommand(command, cwd = process.cwd()) {
     return new Promise((resolve) => {
         let stdout = "";
         let stderr = "";
-        const { shell, args } = shellArgs(command);
-        const child = spawn(shell, args, {
+        const child = spawn(command, {
             cwd,
+            shell: process.platform === "win32"
+                ? (process.env["ComSpec"] ?? "cmd.exe")
+                : "/bin/sh",
             stdio: ["ignore", "pipe", "pipe"],
         });
         child.stdout.on("data", (chunk) => {
