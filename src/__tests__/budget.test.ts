@@ -746,6 +746,44 @@ describe("planningWallet", () => {
 });
 
 // ---------------------------------------------------------------------------
+// FEATURE PROMPT — immediate, narrowly scoped execution
+// ---------------------------------------------------------------------------
+
+describe("buildFeaturePrompt", () => {
+  test("directs simple artifact work to happen before planning or exploration", () => {
+    const result = buildFeaturePrompt(
+      makeFeature({ goal: "Create hello.txt", acceptance: ["hello.txt contains Hello"], excluded: ["Do not edit source files"] }),
+      []
+    );
+
+    expect(result).toContain("Execute the requested feature immediately using the fewest necessary tool calls.");
+    expect(result).toContain("Do not write a plan or explanation before acting.");
+    expect(result).toContain("Do not list, search, inspect, or explore the workspace unless the feature cannot be completed correctly without it.");
+    expect(result).toContain("For a simple file creation or edit, make that change as your first action.");
+  });
+
+  test("keeps the contract, acceptance criteria, exclusions, and deferred scope prominent", () => {
+    const result = buildFeaturePrompt(
+      makeFeature({ goal: "Create hello.txt", acceptance: ["Exact expected contents"], excluded: ["No unrelated edits"] }),
+      ["F02"]
+    );
+
+    const instructionsAt = result.indexOf("INSTRUCTIONS");
+    expect(result).toContain("FEATURE CONTRACT");
+    expect(result).toContain("Acceptance criteria:");
+    expect(result).toContain("Explicitly excluded from this task:");
+    expect(result).toContain("Deferred — do not implement these:");
+    expect(result.indexOf("FEATURE CONTRACT")).toBeLessThan(instructionsAt);
+    expect(result.indexOf("Acceptance criteria:")).toBeLessThan(instructionsAt);
+    expect(result.indexOf("Explicitly excluded from this task:")).toBeLessThan(instructionsAt);
+    expect(result.indexOf("Deferred — do not implement these:")).toBeLessThan(instructionsAt);
+    expect(result).toContain("Exact expected contents");
+    expect(result).toContain("No unrelated edits");
+    expect(result).toContain("F02");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RUNNER — cost limit detection (V1)
 // ---------------------------------------------------------------------------
 

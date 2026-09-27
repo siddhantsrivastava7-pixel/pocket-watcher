@@ -148,7 +148,7 @@ export function buildFeaturePrompt(feature, deferredFeatureIds) {
         lines.push(``, `Deferred — do not implement these:`);
         lines.push(...deferredFeatureIds.map((id) => `  - ${id}`));
     }
-    lines.push(``, `INSTRUCTIONS`, `============`, `Work only on this feature. Implement the goal and satisfy the acceptance criteria above.`, `Do not work on deferred features.`, `Do not perform speculative refactoring.`, `Do not future-proof unrelated architecture.`, `Do not add optional functionality not listed in acceptance criteria.`, `Stop once the acceptance criteria are satisfied and required validation passes.`);
+    lines.push(``, `INSTRUCTIONS`, `============`, `Execute the requested feature immediately using the fewest necessary tool calls.`, `Do not write a plan or explanation before acting.`, `Do not list, search, inspect, or explore the workspace unless the feature cannot be completed correctly without it.`, `For a simple file creation or edit, make that change as your first action.`, `Keep any required inspection narrowly limited to files directly needed for this feature.`, `Work only on this feature. Implement the goal and satisfy the acceptance criteria above.`, `Do not work on deferred features.`, `Do not perform speculative refactoring.`, `Do not future-proof unrelated architecture.`, `Do not add optional functionality not listed in acceptance criteria.`, `Stop once the acceptance criteria are satisfied and required validation passes.`);
     return lines.join("\n");
 }
 // ---------------------------------------------------------------------------
