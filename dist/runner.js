@@ -11,24 +11,77 @@
  * - stdin MUST be closed (stdio: ['ignore', ...]) or bob hangs forever.
  * - BOB_API_KEY must be set in the environment.
  */
-import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { createRequire } from "node:module";
 // ---------------------------------------------------------------------------
-// Executable resolution
+// cross-spawn loader (CJS interop)
 // ---------------------------------------------------------------------------
 /**
- * Return the Bob executable name for the current platform.
- *
- * On Windows, npm installs CLI tools as both a bare script (no extension) and
- * a `.cmd` shim. Node's `spawn` without `shell:true` only finds the `.cmd`
- * shim on Windows because it searches PATH for exact file names — the bare
- * name "bob" without an extension is not an executable file on Windows.
- *
- * On macOS / Linux, "bob" resolves normally via PATH.
- *
- * Exported so tests can assert the resolution logic without invoking Bob.
+ * cross-spawn is a CJS module.  Load it via createRequire so this ESM file
+ * can import it without "require is not defined" errors.
  */
-export function resolveBobExecutable() {
-    return process.platform === "win32" ? "bob.cmd" : "bob";
+const _require = createRequire(import.meta.url);
+const crossSpawn = _require("cross-spawn");
+// ---------------------------------------------------------------------------
+// Platform-aware Bob executable resolver
+// ---------------------------------------------------------------------------
+/**
+ * On Windows, npm global packages are installed as `.cmd` shims.
+ * Node cannot spawn `.cmd` files directly with shell:false (EINVAL) —
+ * they must be invoked via cmd.exe.  cross-spawn handles this correctly:
+ * it routes through `cmd.exe /d /s /c` and applies proper Windows
+ * CreateProcess argument escaping (double-escaping meta chars for
+ * node_modules/.bin shims), so every argv element arrives byte-for-byte.
+ *
+ * shell:true with an args array is NOT used — it triggers Node DEP0190
+ * and concatenates the args into a single string that cmd.exe re-parses,
+ * mangling arguments containing spaces, quotes, or punctuation.
+ *
+ * Resolution order on Windows:
+ *   1. Walk PATH directories looking for bob.cmd (preferred — npm shim)
+ *   2. Fall back to bob.ps1, then plain bob
+ *
+ * On POSIX, returns "bob" unchanged (the OS resolves it from PATH normally).
+ */
+export function resolveBobExecutable(env = process.env) {
+    if (process.platform !== "win32") {
+        return "bob";
+    }
+    const pathEnv = env.PATH ?? env.Path ?? "";
+    const pathDirs = pathEnv.split(";").filter(Boolean);
+    // Preferred Windows extension order for npm-installed CLIs
+    const extensions = [".cmd", ".ps1", ""];
+    for (const dir of pathDirs) {
+        for (const ext of extensions) {
+            const candidate = join(dir, `bob${ext}`);
+            if (existsSync(candidate)) {
+                return candidate;
+            }
+        }
+    }
+    // Fallback: let cross-spawn/OS try
+    return "bob";
+}
+// ---------------------------------------------------------------------------
+// Platform-aware Bob executable launcher
+// ---------------------------------------------------------------------------
+/**
+ * Spawn the Bob CLI with every argument preserved byte-for-byte.
+ *
+ * Uses cross-spawn on all platforms:
+ * - On Windows: cross-spawn resolves the .cmd shim and routes through
+ *   cmd.exe with properly escaped arguments (windowsVerbatimArguments).
+ *   No DEP0190 warning. No shell re-parsing of the arg array.
+ * - On POSIX: cross-spawn is equivalent to node's spawn (no overhead).
+ */
+export function spawnBob(args, env) {
+    const executable = resolveBobExecutable(env);
+    return crossSpawn.spawn(executable, args, {
+        env,
+        // stdin closed (ignore), capture stdout + stderr
+        stdio: ["ignore", "pipe", "pipe"],
+    });
 }
 // ---------------------------------------------------------------------------
 // Narrow prompt builder
@@ -133,11 +186,7 @@ export async function runWithBudget(prompt, maxCost, extraArgs = []) {
         prompt,
     ];
     return new Promise((resolve, reject) => {
-        const child = spawn(resolveBobExecutable(), args, {
-            env: { ...process.env, BOB_API_KEY: apiKey },
-            // stdin closed (ignore), capture stdout + stderr
-            stdio: ["ignore", "pipe", "pipe"],
-        });
+        const child = spawnBob(args, { ...process.env, BOB_API_KEY: apiKey });
         let stdout = "";
         let stderr = "";
         child.stdout.on("data", (chunk) => {

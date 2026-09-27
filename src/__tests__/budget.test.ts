@@ -13,6 +13,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 
 import {
   totalReserve,
@@ -41,7 +43,7 @@ import {
   PLANNING_BUDGET_MAX,
   windowRemaining,
 } from "../budget.js";
-import { buildFeaturePrompt, buildRepairPrompt, resolveBobExecutable } from "../runner.js";
+import { buildFeaturePrompt, buildRepairPrompt, spawnBob, resolveBobExecutable } from "../runner.js";
 import { runValidationCommand, validateFeature, validateProject } from "../validation.js";
 import {
   globalSkillsDir,
@@ -1483,5 +1485,212 @@ describe("applyBurnFactorReforecastAfterValidation — interrupted+validated cos
     const state = nextProjectState(contract, "SAFE");
     expect(state).toBe("LAND");
     expect(contract.features.find((f) => f.id === "F03")!.status).toBe("deferred");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WINDOWS LAUNCHER SMOKE TEST — zero-cost bob --version
+// ---------------------------------------------------------------------------
+
+describe("spawnBob — Windows launcher smoke test", () => {
+  test("bob --version executes successfully via spawnBob (zero-cost)", async () => {
+    const output = await new Promise<string>((resolve, reject) => {
+      const child = spawnBob(["--version"], { ...process.env });
+
+      let stdout = "";
+      let stderr = "";
+
+      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+      child.on("error", reject);
+
+      child.on("close", (code) => {
+        if (code !== 0) {
+          return reject(new Error(`bob --version exited ${code}: ${stderr.trim()}`));
+        }
+        resolve(stdout + stderr);
+      });
+    });
+
+    // bob --version should produce a version string (e.g. "2.0.5" or similar)
+    expect(output.trim().length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WINDOWS EXECUTABLE RESOLUTION (requirement 8)
+// ---------------------------------------------------------------------------
+
+describe("resolveBobExecutable — Windows .cmd selection", () => {
+  const originalPlatform = process.platform;
+
+  // Helper: temporarily override process.platform for a synchronous call
+  function withPlatform<T>(platform: string, fn: () => T): T {
+    Object.defineProperty(process, "platform", { value: platform, configurable: true });
+    try {
+      return fn();
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+    }
+  }
+
+  test("returns 'bob' unchanged on non-Windows platforms", () => {
+    const result = withPlatform("linux", () => resolveBobExecutable({}));
+    expect(result).toBe("bob");
+  });
+
+  test("returns 'bob' unchanged on darwin", () => {
+    const result = withPlatform("darwin", () => resolveBobExecutable({}));
+    expect(result).toBe("bob");
+  });
+
+  test("returns full .cmd path when bob.cmd exists in PATH on Windows", async () => {
+    // Create a temporary directory with a mock bob.cmd
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "pw-resolve-test-"));
+    try {
+      const cmdPath = path.join(tmpDir, "bob.cmd");
+      await writeFile(cmdPath, "@echo off\n");
+
+      const result = withPlatform("win32", () =>
+        resolveBobExecutable({ PATH: tmpDir })
+      );
+      expect(result).toBe(cmdPath);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("prefers .cmd over .ps1 when both exist in PATH on Windows", async () => {
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "pw-resolve-pref-"));
+    try {
+      const cmdPath = path.join(tmpDir, "bob.cmd");
+      const ps1Path = path.join(tmpDir, "bob.ps1");
+      await writeFile(cmdPath, "@echo off\n");
+      await writeFile(ps1Path, "# ps1\n");
+
+      const result = withPlatform("win32", () =>
+        resolveBobExecutable({ PATH: tmpDir })
+      );
+      expect(result).toBe(cmdPath);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to 'bob' when PATH is empty on Windows", () => {
+    const result = withPlatform("win32", () =>
+      resolveBobExecutable({ PATH: "" })
+    );
+    expect(result).toBe("bob");
+  });
+
+  test("real Windows: resolveBobExecutable returns a .cmd path when on win32", () => {
+    if (process.platform !== "win32") {
+      // Skip on non-Windows; this is a Windows-only integration check
+      return;
+    }
+    const exe = resolveBobExecutable(process.env);
+    expect(exe.toLowerCase().endsWith(".cmd")).toBe(true);
+    expect(fs.existsSync(exe)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WINDOWS ARGV REGRESSION — .cmd fixture (requirement 7)
+// ---------------------------------------------------------------------------
+
+describe("spawnBob Windows argv regression — .cmd fixture", () => {
+  // This test only runs on Windows where .cmd files apply.
+  // On other platforms the fixture cannot be invoked the same way,
+  // so we skip gracefully.
+  const isWindows = process.platform === "win32";
+
+  /**
+   * Spawn a .cmd fixture via cross-spawn (the same engine used by spawnBob)
+   * and collect its stdout.  cross-spawn routes .cmd files through
+   * cmd.exe /d /s /c with windowsVerbatimArguments:true and applies proper
+   * escaping so each arg arrives intact.
+   */
+  async function spawnCmdFixture(fixtureCmd: string, args: string[]): Promise<string> {
+    const _req = createRequire(import.meta.url);
+    const csSpawn = (_req("cross-spawn") as { spawn: typeof spawn }).spawn;
+
+    return new Promise((resolve, reject) => {
+      const child = csSpawn(fixtureCmd, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stdout = "";
+      let stderr = "";
+
+      child.stdout!.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code !== 0) {
+          return reject(new Error(`fixture exited ${code}: ${stderr.trim()}`));
+        }
+        resolve(stdout);
+      });
+    });
+  }
+
+  test("arguments with spaces are preserved as distinct tokens", async () => {
+    if (!isWindows) return;
+
+    const fixturePath = path.resolve("src/__tests__/fixtures/echo-args.cmd");
+    // Two separate args each containing internal spaces — must NOT be split
+    const args = ["hello world", "foo bar baz"];
+    const output = await spawnCmdFixture(fixturePath, args);
+
+    expect(output).toContain("arg1=hello world");
+    expect(output).toContain("arg2=foo bar baz");
+    // Verify they are exactly two args (no extra splitting)
+    expect(output).not.toContain("arg3=");
+  });
+
+  test("arguments with punctuation and CLI flags are preserved", async () => {
+    if (!isWindows) return;
+
+    const fixturePath = path.resolve("src/__tests__/fixtures/echo-args.cmd");
+    // Typical Bob invocation args — must arrive intact
+    const args = ["run", "--format", "json", "--max-cost", "0.05"];
+    const output = await spawnCmdFixture(fixturePath, args);
+
+    expect(output).toContain("arg1=run");
+    expect(output).toContain("arg2=--format");
+    expect(output).toContain("arg3=json");
+    expect(output).toContain("arg4=--max-cost");
+    expect(output).toContain("arg5=0.05");
+    expect(output).not.toContain("arg6=");
+  });
+
+  test("argument count matches — no phantom splitting at spaces", async () => {
+    if (!isWindows) return;
+
+    const fixturePath = path.resolve("src/__tests__/fixtures/echo-args.cmd");
+    // 3 args, middle one contains spaces — must arrive as exactly 3
+    const args = ["alpha", "beta gamma delta", "epsilon"];
+    const output = await spawnCmdFixture(fixturePath, args);
+
+    expect(output).toContain("arg1=alpha");
+    expect(output).toContain("arg2=beta gamma delta");
+    expect(output).toContain("arg3=epsilon");
+    expect(output).not.toContain("arg4=");
+  });
+
+  test("apostrophes and minus signs in args are preserved", async () => {
+    if (!isWindows) return;
+
+    const fixturePath = path.resolve("src/__tests__/fixtures/echo-args.cmd");
+    const args = ["it's-a-test", "--disable-mcp"];
+    const output = await spawnCmdFixture(fixturePath, args);
+
+    expect(output).toContain("arg1=it's-a-test");
+    expect(output).toContain("arg2=--disable-mcp");
   });
 });

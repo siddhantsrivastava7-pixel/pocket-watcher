@@ -33,6 +33,9 @@
     "scope-management"
   ],
   "license": "MIT",
+  "dependencies": {
+    "cross-spawn": "^7.0.6"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "@types/node": "^22.10.0",
