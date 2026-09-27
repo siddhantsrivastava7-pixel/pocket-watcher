@@ -12,7 +12,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 
@@ -43,7 +43,7 @@ import {
   PLANNING_BUDGET_MAX,
   windowRemaining,
 } from "../budget.js";
-import { buildFeaturePrompt, buildRepairPrompt, spawnBob, resolveBobExecutable } from "../runner.js";
+import { buildFeaturePrompt, buildRepairPrompt, parseBobJsonOutput, spawnBob, resolveBobExecutable } from "../runner.js";
 import { runValidationCommand, validateFeature, validateProject } from "../validation.js";
 import {
   globalSkillsDir,
@@ -177,6 +177,12 @@ describe("resolveAssignedBudget — budget acquisition", () => {
     expect(result.budgetMode).toBe("custom");
     expect(result.capped).toBe(false);
     expect(result.providerRemainingAtStart).toBeNull();
+  });
+
+  test("rejects non-positive or non-finite budgets", () => {
+    expect(() => resolveAssignedBudget(null, 0)).toThrow();
+    expect(() => resolveAssignedBudget(null, Number.NaN)).toThrow();
+    expect(() => resolveAssignedBudget(Number.POSITIVE_INFINITY, null)).toThrow();
   });
 });
 
@@ -481,6 +487,15 @@ describe("repairWallet", () => {
     expect(wallet).toBeCloseTo(0.49, 5);
     // spendable budget might be 0 but repair wallet is still available
   });
+
+  test("repair wallet cannot exceed total window remaining", () => {
+    const contract = makeContract({
+      currentWindow: makeWindow({ assignedBudget: 2, actualSpent: 1.8 }),
+      reserves: makeReserves({ repair: 0.5, validation: 0, integration: 0 }),
+      overshootGuard: 0.01,
+    });
+    expect(repairWallet(contract)).toBeCloseTo(0.19, 5);
+  });
 });
 
 describe("recordRepairSpend — repair reserve accounting", () => {
@@ -590,6 +605,15 @@ describe("LAND mode — state rules", () => {
       state: "LAND",
     });
     const after = setFeatureStatus(contract, "f1", "done");
+    expect(after.state).toBe("LAND");
+  });
+
+  test("manual LAND remains sticky when validation fails", () => {
+    const contract = makeContract({
+      features: [makeFeature({ id: "f1", status: "awaiting_validation" })],
+      state: "LAND",
+    });
+    const after = setFeatureStatus(contract, "f1", "validation_failed");
     expect(after.state).toBe("LAND");
   });
 
@@ -726,40 +750,11 @@ describe("planningWallet", () => {
 // ---------------------------------------------------------------------------
 
 describe("runner — cost limit detection via output parsing", () => {
-  function parseBobOutput(lines: string[]) {
-    const allLines: Array<{ type: string; message?: string; stats?: { session_costs: number } }> = [];
-    let resultLine: { stats: { session_costs: number; duration_ms: number; tool_calls: number; task_id: string }; status: string; last_message: string | null } | null = null;
-    let costLimitHit = false;
-
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!line) continue;
-      try {
-        const obj = JSON.parse(line) as { type: string; message?: string; stats?: { session_costs: number; duration_ms: number; tool_calls: number; task_id: string }; status?: string; last_message?: string | null };
-        allLines.push(obj);
-        if (obj.type === "result") {
-          resultLine = obj as typeof resultLine;
-        }
-        if (
-          obj.type === "error" &&
-          typeof obj.message === "string" &&
-          obj.message.toLowerCase().includes("cost limit")
-        ) {
-          costLimitHit = true;
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    return { allLines, resultLine, costLimitHit };
-  }
-
   test("normal completion: no cost limit hit", () => {
     const lines = [
       JSON.stringify({ type: "result", status: "success", stats: { session_costs: 0.02, duration_ms: 1000, tool_calls: 0, task_id: "abc" }, last_message: "hello" }),
     ];
-    const { costLimitHit, resultLine } = parseBobOutput(lines);
+    const { costLimitHit, resultLine } = parseBobJsonOutput(lines.join("\n"));
     expect(costLimitHit).toBe(false);
     expect(resultLine?.stats.session_costs).toBe(0.02);
   });
@@ -769,7 +764,7 @@ describe("runner — cost limit detection via output parsing", () => {
       JSON.stringify({ type: "error", severity: "error", message: "The task reached the cost limit of 0.001 (spent: 0.02)." }),
       JSON.stringify({ type: "result", status: "success", stats: { session_costs: 0.02, duration_ms: 500, tool_calls: 1, task_id: "xyz" }, last_message: "partial" }),
     ];
-    const { costLimitHit, resultLine } = parseBobOutput(lines);
+    const { costLimitHit, resultLine } = parseBobJsonOutput(lines.join("\n"));
     expect(costLimitHit).toBe(true);
     expect(resultLine?.status).toBe("success");
     expect(resultLine?.stats.session_costs).toBe(0.02);
@@ -781,7 +776,7 @@ describe("runner — cost limit detection via output parsing", () => {
     const lines = [
       JSON.stringify({ type: "result", status: "success", stats: { session_costs: 0.02, duration_ms: 1000, tool_calls: 0, task_id: "abc" }, last_message: "hello" }),
     ];
-    const { resultLine } = parseBobOutput(lines);
+    const { resultLine } = parseBobJsonOutput(lines.join("\n"));
     expect(resultLine?.status).toBe("success");
     // After parsing, the status field from Bob must NOT be used to determine feature done
     // The feature status must go through awaiting_validation → validated → done
@@ -792,6 +787,13 @@ describe("runner — cost limit detection via output parsing", () => {
     // Feature completion requires deterministic validation
     const exitCode = 0;
     expect(exitCode).toBe(0); // exit code irrelevant for feature status
+  });
+
+  test("rejects a result event without authoritative session_costs", () => {
+    const { resultLine } = parseBobJsonOutput(
+      JSON.stringify({ type: "result", status: "success", stats: {} })
+    );
+    expect(resultLine).toBeNull();
   });
 });
 
@@ -807,9 +809,9 @@ describe("resolveBobExecutable — platform-dependent executable name", () => {
     Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
   });
 
-  test("returns 'bob.cmd' on win32", () => {
+  test("falls back to 'bob' on win32 when PATH has no launcher", () => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-    expect(resolveBobExecutable()).toBe("bob.cmd");
+    expect(resolveBobExecutable({ PATH: "" })).toBe("bob");
   });
 
   test("returns 'bob' on darwin", () => {
@@ -1249,6 +1251,17 @@ describe("installSkill — file system operations", () => {
     expect(result.warnings.length).toBeGreaterThan(0);
     expect(result.warnings[0]).toContain("does not appear to be a Pocket Watcher skill");
   });
+
+  test("does not claim ownership from a body-only Pocket Watcher mention", async () => {
+    const skillDir = path.join(tmpDir, ".bob", "skills", "pocket-watcher");
+    await mkdir(skillDir, { recursive: true });
+    const mdPath = path.join(skillDir, "SKILL.md");
+    await writeFile(mdPath, "---\nname: another-skill\n---\nMentions Pocket Watcher only as a reference.\n");
+
+    const result = await installSkill("project", tmpDir);
+    expect(result.warnings.length).toBe(1);
+    expect(fs.readFileSync(mdPath, "utf-8")).toContain("name: another-skill");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1489,32 +1502,47 @@ describe("applyBurnFactorReforecastAfterValidation — interrupted+validated cos
 });
 
 // ---------------------------------------------------------------------------
-// WINDOWS LAUNCHER SMOKE TEST — zero-cost bob --version
+// LAUNCHER SMOKE TEST — local fixture, never invokes real Bob
 // ---------------------------------------------------------------------------
 
 describe("spawnBob — Windows launcher smoke test", () => {
-  test("bob --version executes successfully via spawnBob (zero-cost)", async () => {
-    const output = await new Promise<string>((resolve, reject) => {
-      const child = spawnBob(["--version"], { ...process.env });
+  test("local bob fixture executes successfully via spawnBob", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "pw-bob-launcher-"));
+    try {
+      const launcher = path.join(tmpDir, process.platform === "win32" ? "bob.cmd" : "bob");
+      const content = process.platform === "win32"
+        ? "@echo off\r\necho mock-bob 0.0.0\r\n"
+        : "#!/bin/sh\necho mock-bob 0.0.0\n";
+      await writeFile(launcher, content);
+      if (process.platform !== "win32") await chmod(launcher, 0o755);
 
-      let stdout = "";
-      let stderr = "";
+      const output = await new Promise<string>((resolve, reject) => {
+        const child = spawnBob(["--version"], {
+          ...process.env,
+          PATH: tmpDir,
+          Path: tmpDir,
+        });
 
-      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+        let stdout = "";
+        let stderr = "";
 
-      child.on("error", reject);
+        child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+        child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
 
-      child.on("close", (code) => {
-        if (code !== 0) {
-          return reject(new Error(`bob --version exited ${code}: ${stderr.trim()}`));
-        }
-        resolve(stdout + stderr);
+        child.on("error", reject);
+
+        child.on("close", (code) => {
+          if (code !== 0) {
+            return reject(new Error(`mock bob --version exited ${code}: ${stderr.trim()}`));
+          }
+          resolve(stdout + stderr);
+        });
       });
-    });
 
-    // bob --version should produce a version string (e.g. "2.0.5" or similar)
-    expect(output.trim().length).toBeGreaterThan(0);
+      expect(output).toContain("mock-bob 0.0.0");
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1587,14 +1615,18 @@ describe("resolveBobExecutable — Windows .cmd selection", () => {
     expect(result).toBe("bob");
   });
 
-  test("real Windows: resolveBobExecutable returns a .cmd path when on win32", () => {
-    if (process.platform !== "win32") {
-      // Skip on non-Windows; this is a Windows-only integration check
-      return;
+  test("selects bob.exe when it is the available Windows launcher", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "pw-resolve-exe-"));
+    try {
+      const exePath = path.join(tmpDir, "bob.exe");
+      await writeFile(exePath, "fixture");
+      const result = withPlatform("win32", () =>
+        resolveBobExecutable({ PATH: tmpDir })
+      );
+      expect(result).toBe(exePath);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
     }
-    const exe = resolveBobExecutable(process.env);
-    expect(exe.toLowerCase().endsWith(".cmd")).toBe(true);
-    expect(fs.existsSync(exe)).toBe(true);
   });
 });
 

@@ -12,7 +12,7 @@
  * - BOB_API_KEY must be set in the environment.
  */
 import { spawn } from "node:child_process";
-import type { RunResult, Feature, ValidationCommandResult } from "./types.js";
+import type { BobOutputLine, BobResultLine, RunResult, Feature, ValidationCommandResult } from "./types.js";
 /**
  * On Windows, npm global packages are installed as `.cmd` shims.
  * Node cannot spawn `.cmd` files directly with shell:false (EINVAL) —
@@ -27,7 +27,7 @@ import type { RunResult, Feature, ValidationCommandResult } from "./types.js";
  *
  * Resolution order on Windows:
  *   1. Walk PATH directories looking for bob.cmd (preferred — npm shim)
- *   2. Fall back to bob.ps1, then plain bob
+ *   2. Fall back to bob.exe, then plain bob
  *
  * On POSIX, returns "bob" unchanged (the OS resolves it from PATH normally).
  */
@@ -43,6 +43,11 @@ export declare function resolveBobExecutable(env?: NodeJS.ProcessEnv): string;
  */
 export declare function spawnBob(args: string[], env: NodeJS.ProcessEnv): ReturnType<typeof spawn>;
 export { RunResult };
+export declare function parseBobJsonOutput(stdout: string): {
+    allLines: BobOutputLine[];
+    resultLine: BobResultLine | null;
+    costLimitHit: boolean;
+};
 /**
  * Build a narrow execution prompt for a single feature.
  *
@@ -62,4 +67,4 @@ export declare function buildRepairPrompt(feature: Feature, failedCommands: Vali
  *
  * stdin is closed immediately (stdio: ['ignore', ...]) so bob does not hang.
  */
-export declare function runWithBudget(prompt: string, maxCost: number, extraArgs?: string[]): Promise<RunResult>;
+export declare function runWithBudget(prompt: string, maxCost: number): Promise<RunResult>;

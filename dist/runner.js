@@ -40,7 +40,7 @@ const crossSpawn = _require("cross-spawn");
  *
  * Resolution order on Windows:
  *   1. Walk PATH directories looking for bob.cmd (preferred — npm shim)
- *   2. Fall back to bob.ps1, then plain bob
+ *   2. Fall back to bob.exe, then plain bob
  *
  * On POSIX, returns "bob" unchanged (the OS resolves it from PATH normally).
  */
@@ -49,9 +49,12 @@ export function resolveBobExecutable(env = process.env) {
         return "bob";
     }
     const pathEnv = env.PATH ?? env.Path ?? "";
-    const pathDirs = pathEnv.split(";").filter(Boolean);
+    const pathDirs = pathEnv
+        .split(";")
+        .map((dir) => dir.trim().replace(/^"|"$/g, ""))
+        .filter(Boolean);
     // Preferred Windows extension order for npm-installed CLIs
-    const extensions = [".cmd", ".ps1", ""];
+    const extensions = [".cmd", ".exe", ""];
     for (const dir of pathDirs) {
         for (const ext of extensions) {
             const candidate = join(dir, `bob${ext}`);
@@ -82,6 +85,40 @@ export function spawnBob(args, env) {
         // stdin closed (ignore), capture stdout + stderr
         stdio: ["ignore", "pipe", "pipe"],
     });
+}
+export function parseBobJsonOutput(stdout) {
+    const allLines = [];
+    let resultLine = null;
+    let costLimitHit = false;
+    for (const raw of stdout.split("\n")) {
+        const line = raw.trim();
+        if (!line)
+            continue;
+        try {
+            const obj = JSON.parse(line);
+            allLines.push(obj);
+            if (obj.type === "result" &&
+                "stats" in obj &&
+                typeof obj.stats === "object" &&
+                obj.stats !== null &&
+                Number.isFinite(obj.stats.session_costs) &&
+                obj.stats.session_costs >= 0) {
+                resultLine = obj;
+            }
+            // Bob reports cost-limit exhaustion as an explicit error event. Its
+            // process exit code and result status are not reliable indicators.
+            if (obj.type === "error" &&
+                "message" in obj &&
+                typeof obj.message === "string" &&
+                obj.message.toLowerCase().includes("cost limit")) {
+                costLimitHit = true;
+            }
+        }
+        catch {
+            // Bob may write non-JSON diagnostics alongside JSONL output.
+        }
+    }
+    return { allLines, resultLine, costLimitHit };
 }
 // ---------------------------------------------------------------------------
 // Narrow prompt builder
@@ -166,12 +203,12 @@ export function buildRepairPrompt(feature, failedCommands, deferredFeatureIds) {
  *
  * stdin is closed immediately (stdio: ['ignore', ...]) so bob does not hang.
  */
-export async function runWithBudget(prompt, maxCost, extraArgs = []) {
+export async function runWithBudget(prompt, maxCost) {
     const apiKey = process.env.BOB_API_KEY;
     if (!apiKey) {
         throw new Error("BOB_API_KEY environment variable is required for pocket run");
     }
-    if (maxCost <= 0) {
+    if (!Number.isFinite(maxCost) || maxCost <= 0) {
         throw new Error(`Invalid maxCost: ${maxCost}. Must be > 0. Bob rejects zero and negative values.`);
     }
     const args = [
@@ -182,7 +219,6 @@ export async function runWithBudget(prompt, maxCost, extraArgs = []) {
         String(maxCost),
         "--disable-mcp",
         "--disable-subagents",
-        ...extraArgs,
         prompt,
     ];
     return new Promise((resolve, reject) => {
@@ -198,40 +234,17 @@ export async function runWithBudget(prompt, maxCost, extraArgs = []) {
         child.on("error", reject);
         child.on("close", (code) => {
             const exitCode = code ?? 1;
-            const allLines = [];
-            let resultLine = null;
-            let costLimitHit = false;
-            for (const raw of stdout.split("\n")) {
-                const line = raw.trim();
-                if (!line)
-                    continue;
-                try {
-                    const obj = JSON.parse(line);
-                    allLines.push(obj);
-                    if (obj.type === "result") {
-                        resultLine = obj;
-                    }
-                    // Cost limit detection: MUST parse the error event text.
-                    // Do NOT use exit code or result.status — both are 0/"success" on cost limit.
-                    if (obj.type === "error" &&
-                        "message" in obj &&
-                        typeof obj.message === "string" &&
-                        obj.message
-                            .toLowerCase()
-                            .includes("cost limit")) {
-                        costLimitHit = true;
-                    }
-                }
-                catch {
-                    // non-JSON lines — ignore
-                }
-            }
+            const { allLines, resultLine, costLimitHit } = parseBobJsonOutput(stdout);
             // If bob exited non-zero and produced no result, reject as fatal error.
             if (exitCode !== 0 && !resultLine) {
                 const errMsg = stderr.trim() || "bob run exited with non-zero code and no result";
                 return reject(new Error(`bob run failed: ${errMsg}`));
             }
-            const actualCost = resultLine?.stats.session_costs ?? 0;
+            if (!resultLine) {
+                const detail = stderr.trim();
+                return reject(new Error(`bob run did not emit a valid result with stats.session_costs${detail ? `: ${detail}` : ""}`));
+            }
+            const actualCost = resultLine.stats.session_costs;
             resolve({ actualCost, costLimitHit, exitCode, resultLine, allLines });
         });
     });

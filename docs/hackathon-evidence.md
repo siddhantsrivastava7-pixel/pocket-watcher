@@ -7,9 +7,10 @@ All evidence is from real execution. Nothing here is fabricated or simulated.
 
 ## Overview
 
-Pocket Watcher was built and verified across four distinct Bob sessions, each captured as a screenshot
-in `bob_sessions/`. The evidence chain covers: architecture and planning, CLI capability spike,
-V1 implementation, validation + skill, and the definitive COMPRESS proof.
+Pocket Watcher was built and verified across multiple Bob sessions captured as screenshots
+in `bob_sessions/`. The evidence chain covers architecture and planning, the CLI capability spike,
+V1 implementation, validation + skill, the definitive COMPRESS proof, Windows compatibility,
+and final package/documentation work.
 
 ---
 
@@ -70,7 +71,7 @@ Key findings:
 - COMPRESS flow verified end-to-end with real Bob calls
 - Bob Skill project installation verified
 - Bob Skill global installation verified (isolated HOME)
-- Skill discoverability confirmed (`/pocket-watcher` invocation)
+- Skill discoverability confirmed; interactive slash invocation was not directly exercised headlessly
 
 **COMPRESS proof:** [`tasks/e2e-compress-proof.md`](../tasks/e2e-compress-proof.md)
 
@@ -90,6 +91,17 @@ Key findings:
 
 ---
 
+### Later sessions — Windows and packaging audits
+
+**Files:** `bob_sessions/complete Windows compatibility audit.png`,
+`bob_sessions/package and documentation.png`
+
+- Portable deterministic validation and COMPRESS demo commands
+- Windows Bob launcher and argument-handling audit
+- npm packaging and documentation review
+
+---
+
 ## Proof requirements satisfied
 
 | Requirement | Evidence location |
@@ -103,7 +115,7 @@ Key findings:
 | LAND mode blocks new features | `tasks/e2e-budget-stress-test.md` — F99 blocked |
 | Bob Skill installs and is discoverable | `tasks/e2e-compress-proof.md` — Part E + F |
 | `--max-cost` behavior understood | `tasks/max-cost-spike.md` — Parts A1–A7 |
-| 130 unit tests pass | `src/__tests__/budget.test.ts` |
+| 150 automated tests pass | `src/__tests__/budget.test.ts` |
 
 ---
 
@@ -113,7 +125,7 @@ Key findings:
 npm test
 ```
 
-Result (baseline): **130 tests passing, 0 failures**
+Result (final local review): **150 tests passing, 0 failures**
 
 Coverage: budget accounting, forecasting, state machine, LAND rules,
 burn factor, validation, repair, Bob Skill install, runner output parsing.

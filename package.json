@@ -2,6 +2,14 @@
   "name": "pocket-watcher",
   "version": "0.1.0-hackathon.1",
   "description": "Make your coding agent finish before your compute budget does. Budget-aware execution governor for Bob and coding agents.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/siddhantsrivastava7-pixel/pocket-watcher.git"
+  },
+  "homepage": "https://github.com/siddhantsrivastava7-pixel/pocket-watcher#readme",
+  "bugs": {
+    "url": "https://github.com/siddhantsrivastava7-pixel/pocket-watcher/issues"
+  },
   "type": "module",
   "bin": {
     "pocket": "dist/cli.js"

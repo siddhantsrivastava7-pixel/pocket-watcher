@@ -42,12 +42,12 @@ It:
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) >=22.15
-- [Bob](https://www.ibm.com/products/watsonx-ai) CLI with `BOB_API_KEY` set
+- [Bob](https://www.ibm.com/products/watsonx-ai) CLI; `BOB_API_KEY` is required for `scope`, `run`, and `repair`
 
 ### Install globally from a local build
 
 ```sh
-git clone <repo>
+git clone https://github.com/siddhantsrivastava7-pixel/pocket-watcher.git
 cd pocket-watcher
 npm install
 npm run build
@@ -113,20 +113,23 @@ pocket scope "Build a user auth module with signup, login, and JWT tokens"
 # 3. Check the plan
 pocket status
 
-# 4. Execute features one at a time
+# 4. Add trusted, portable validation commands to .pocket/ship-contract.json
+#    for each feature before relying on `pocket validate`.
+
+# 5. Execute features one at a time
 pocket run F01
 pocket validate F01
 
 pocket run F02
 pocket validate F02
 
-# 5. If COMPRESS fires: defer optional features
+# 6. If COMPRESS fires: defer optional features
 pocket defer F03
 
-# 6. Run project-level finishing checks
+# 7. Run project-level finishing checks
 pocket check
 
-# 7. Enter LAND when finishing
+# 8. Enter LAND when finishing
 pocket land
 ```
 
@@ -143,7 +146,7 @@ SHIPPING RESERVE IS PROTECTED
 When you run `pocket init --budget 10`:
 
 - **10 BC** is assigned to this project. It never increases automatically.
-- A **protected reserve** is set aside immediately (default: ~15% for validation, repair, integration).
+- A **protected reserve** is set aside immediately (default: 1.0 BC total: 0.5 validation, 0.25 repair, 0.25 integration).
 - The remainder is the **flexible spendable** envelope for feature work.
 
 Each feature receives a **wallet** equal to its high estimate (or remaining spendable, whichever is lower).
@@ -163,6 +166,10 @@ pocket init --budget 10
 
 The 10 BC cap is enforced against all Pocket Watcher runs in this project.
 Your account balance above 10 BC is untouched.
+
+With the default reserve and 0.01 BC overshoot guard, a new project budget must
+exceed 1.01 BC. The smaller budgets in the evidence fixtures use explicitly
+configured smaller reserves in their checked-in ship contracts.
 
 ---
 
@@ -274,7 +281,7 @@ Bob Skill (/pocket-watcher)
 Pocket Watcher CLI (pocket)
   - budget accounting
   - forecast and risk
-  - state machine (SCOPE → BUILD → COMPRESS → LAND → SHIPPED)
+  - state machine (SCOPE → BUILD / COMPRESS → LAND)
   - deterministic validation
   - repair reserve management
        ↓
@@ -303,6 +310,11 @@ All economics are delegated to the CLI.
 - **Automatic provider support beyond Bob is not implemented.** Pocket Watcher V1 targets Bob only.
 - **Custom budgets are enforced against managed Pocket Watcher runs only.** Running Bob directly
   outside of `pocket run` is not tracked.
+- **Validation commands are trusted project configuration.** `pocket validate` and `pocket check`
+  execute the configured strings with the platform shell; review untrusted ship contracts before running them.
+- **`pocket scope` does not generate executable validation commands.** It produces acceptance text,
+  estimates, and dependencies; add trusted `feature.validation.commands` and
+  `projectValidation.commands` to the ship contract before relying on deterministic completion evidence.
 - **Exact future cost prediction is intentionally conservative, not magic.** The burn-factor
   reforecast scales estimates based on observed overruns, but it cannot predict arbitrary future costs.
 
@@ -329,7 +341,7 @@ All economics are delegated to the CLI.
 | `src/install.ts` | Bob Skill installer |
 | `src/store.ts` | Contract persistence |
 | `src/types.ts` | Core type definitions |
-| `src/__tests__/budget.test.ts` | 130 unit tests |
+| `src/__tests__/budget.test.ts` | 150 automated tests |
 | `tasks/e2e-compress-proof.md` | Real observed COMPRESS proof |
 | `tasks/e2e-budget-stress-test.md` | Real observed budget stress test |
 | `tasks/max-cost-spike.md` | Bob --max-cost behavior observations |

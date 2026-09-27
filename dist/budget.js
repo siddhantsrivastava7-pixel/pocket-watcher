@@ -130,8 +130,8 @@ export function bobMaxCost(contract, feature) {
  * Returns null if the remaining reserve is too small to justify a repair run.
  */
 export function repairWallet(contract) {
-    const repairReserve = contract.reserves.repair;
-    const safe = repairReserve - contract.overshootGuard;
+    const available = Math.min(contract.reserves.repair, Math.max(0, windowRemaining(contract.currentWindow)));
+    const safe = available - contract.overshootGuard;
     if (safe <= 0)
         return null;
     return safe;
@@ -158,6 +158,14 @@ export function planningWallet(contract) {
  * Returns { assignedBudget, budgetMode, capped }
  */
 export function resolveAssignedBudget(providerRemaining, userBudget) {
+    if (providerRemaining !== null &&
+        (!Number.isFinite(providerRemaining) || providerRemaining <= 0)) {
+        throw new Error("providerRemaining must be a positive finite number");
+    }
+    if (userBudget !== null &&
+        (!Number.isFinite(userBudget) || userBudget <= 0)) {
+        throw new Error("userBudget must be a positive finite number");
+    }
     if (userBudget === null) {
         // auto mode
         if (providerRemaining === null) {
@@ -237,6 +245,11 @@ export function canRepairFeature(contract, feature) {
 // State transitions
 // ---------------------------------------------------------------------------
 export function nextProjectState(contract, risk) {
+    // LAND is an explicit one-way finishing decision within a compute window.
+    // Validation and repair may update risk, but must never reopen feature work.
+    if (contract.state === "LAND" || contract.state === "SHIPPED") {
+        return contract.state;
+    }
     const hasPending = contract.features.some((f) => f.status === "pending" ||
         f.status === "budget_interrupted" ||
         f.status === "awaiting_validation" ||
@@ -262,6 +275,9 @@ export function nextProjectState(contract, risk) {
  * @param interrupted True if cost-limit event was detected
  */
 export function recordSpend(contract, featureId, actualSpend, interrupted) {
+    if (!Number.isFinite(actualSpend) || actualSpend < 0) {
+        throw new Error("actualSpend must be a non-negative finite number");
+    }
     // Update window spend
     const updatedWindow = {
         ...contract.currentWindow,
@@ -305,6 +321,9 @@ export function recordSpend(contract, featureId, actualSpend, interrupted) {
  * After repair spend is recorded, caller must run validation to finalize status.
  */
 export function recordRepairSpend(contract, featureId, actualSpend, interrupted) {
+    if (!Number.isFinite(actualSpend) || actualSpend < 0) {
+        throw new Error("actualSpend must be a non-negative finite number");
+    }
     // Deduct from the repair reserve
     const newRepairReserve = Math.max(0, contract.reserves.repair - actualSpend);
     const updatedReserves = {
@@ -460,6 +479,9 @@ export function deferFeature(contract, featureId) {
 // Create a new compute window (for pocket resume)
 // ---------------------------------------------------------------------------
 export function openNewWindow(contract, assignedBudget, providerRemainingAtStart, budgetMode) {
+    if (!Number.isFinite(assignedBudget) || assignedBudget <= 0) {
+        throw new Error("assignedBudget must be a positive finite number");
+    }
     const closedWindow = {
         ...contract.currentWindow,
         closedAt: new Date().toISOString(),

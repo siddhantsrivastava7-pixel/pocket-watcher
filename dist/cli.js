@@ -80,7 +80,6 @@ STATES
   BUILD     Executing features within budget.
   COMPRESS  Over budget — defer optional features before continuing.
   LAND      Finishing reserve is low — validate and repair only, no new scope.
-  SHIPPED   Done.
 
 RISK
   ✅ SAFE    Remaining forecast < 80% of spendable.
@@ -115,7 +114,7 @@ pocket init [--budget <n>]
   Examples:
     pocket init                 Ask for your current balance, use it all
     pocket init --budget 10     Cap this project at 10 Bobcoins
-    pocket init --budget 0.5    Cap this project at 0.5 Bobcoins (useful for demos)
+    pocket init --budget 2      Cap this project at 2 Bobcoins
 `);
             break;
         case "scope":
@@ -341,8 +340,9 @@ function parseBudgetFlag(args) {
     const idx = args.indexOf("--budget");
     if (idx === -1)
         return null;
-    const val = parseFloat(args[idx + 1]);
-    if (isNaN(val) || val <= 0) {
+    const raw = args[idx + 1];
+    const val = Number(raw);
+    if (!raw || !Number.isFinite(val) || val <= 0) {
         console.error(`Error: --budget must be a positive number`);
         exit(1);
     }
@@ -364,8 +364,8 @@ async function getProviderRemaining() {
 async function askUserForBudget() {
     console.log(`\nPocket Watcher cannot determine your remaining provider quota automatically.`);
     const answer = await askQuestion(`How much usage do you currently have left in this window (in Bobcoins)? `);
-    const val = parseFloat(answer);
-    if (isNaN(val) || val <= 0) {
+    const val = Number(answer);
+    if (!Number.isFinite(val) || val <= 0) {
         console.error(`Error: Please enter a positive number.`);
         exit(1);
     }
@@ -381,6 +381,12 @@ async function cmdInit(args) {
         providerRemaining = await askUserForBudget();
     }
     const resolved = resolveAssignedBudget(providerRemaining, userBudget);
+    const minimumUsableBudget = totalReserve(DEFAULT_RESERVES) + DEFAULT_OVERSHOOT_GUARD;
+    if (resolved.assignedBudget <= minimumUsableBudget) {
+        console.error(`Error: assigned budget must exceed ${bc(minimumUsableBudget)} with the default ` +
+            `protected reserves (${bc(totalReserve(DEFAULT_RESERVES))}) and overshoot guard.`);
+        exit(1);
+    }
     if (resolved.capped && userBudget !== null && providerRemaining !== null) {
         console.log(`\n⚠️  Budget capped:`);
         console.log(`   Requested budget       ${bc(userBudget)}`);
@@ -439,7 +445,7 @@ async function cmdInit(args) {
     }
     console.log(`   Assigned budget : ${bc(window.assignedBudget)}`);
     console.log(`   Protected floor : ${bc(totalReserve(reserves))}`);
-    console.log(`   Spendable       : ${bc(window.assignedBudget - totalReserve(reserves))}`);
+    console.log(`   Spendable       : ${bc(spendableBudget(contract))}`);
     console.log(`\n   Run: pocket scope "<your request>"`);
 }
 // ---------------------------------------------------------------------------
@@ -604,7 +610,18 @@ function parsePlanningOutput(output) {
         const parsed = JSON.parse(match[0]);
         if (!Array.isArray(parsed))
             return [];
-        return parsed.filter(isValidCandidate);
+        const candidates = parsed.filter(isValidCandidate);
+        // Never silently drop malformed or ambiguous plan entries: that could
+        // change user-visible scope without an explicit prioritization decision.
+        if (candidates.length !== parsed.length)
+            return [];
+        const ids = new Set(candidates.map((candidate) => candidate.id));
+        if (ids.size !== candidates.length)
+            return [];
+        if (candidates.some((candidate) => candidate.dependencies.some((dependencyId) => dependencyId === candidate.id || !ids.has(dependencyId)))) {
+            return [];
+        }
+        return candidates;
     }
     catch {
         return [];
@@ -614,17 +631,21 @@ function isValidCandidate(obj) {
     if (typeof obj !== "object" || obj === null)
         return false;
     const o = obj;
+    const estimate = o.estimate;
     return (typeof o.id === "string" &&
+        o.id.trim().length > 0 &&
         typeof o.name === "string" &&
+        o.name.trim().length > 0 &&
         typeof o.goal === "string" &&
-        Array.isArray(o.dependencies) &&
-        typeof o.priority === "string" &&
-        typeof o.estimate === "object" &&
-        o.estimate !== null &&
-        typeof o.estimate.low === "number" &&
-        typeof o.estimate.high === "number" &&
-        Array.isArray(o.acceptance) &&
-        Array.isArray(o.excluded));
+        Array.isArray(o.dependencies) && o.dependencies.every((v) => typeof v === "string") &&
+        (o.priority === "must" || o.priority === "should" || o.priority === "could") &&
+        estimate !== null &&
+        typeof estimate.low === "number" && Number.isFinite(estimate.low) && estimate.low >= 0 &&
+        typeof estimate.high === "number" && Number.isFinite(estimate.high) && estimate.high > 0 &&
+        estimate.low <= estimate.high &&
+        (estimate.confidence === "low" || estimate.confidence === "medium" || estimate.confidence === "high") &&
+        Array.isArray(o.acceptance) && o.acceptance.length > 0 && o.acceptance.every((v) => typeof v === "string") &&
+        Array.isArray(o.excluded) && o.excluded.every((v) => typeof v === "string"));
 }
 // ---------------------------------------------------------------------------
 // 3. pocket status
@@ -729,6 +750,11 @@ async function cmdRun(featureId) {
         console.error(`Error: feature "${featureId}" is deferred. Use 'pocket defer' to manage.`);
         exit(1);
     }
+    if (feature.status !== "pending") {
+        console.error(`Error: feature "${featureId}" has status ${feature.status}. ` +
+            `Use 'pocket validate ${featureId}' or 'pocket repair ${featureId}' instead of starting a new feature run.`);
+        exit(1);
+    }
     // LAND mode: block ALL new pending features.
     // Only allows validation, check, and repair (handled by separate commands).
     if (contract.state === "LAND") {
@@ -790,6 +816,13 @@ async function cmdRun(featureId) {
         runResult = await runWithBudget(prompt, maxCost);
     }
     catch (err) {
+        contract = {
+            ...contract,
+            activeFeatureId: null,
+            features: contract.features.map((f) => f.id === featureId ? { ...f, status: feature.status } : f),
+            updatedAt: new Date().toISOString(),
+        };
+        await saveContract(contract);
         console.error(`Error running bob: ${err.message}`);
         exit(1);
     }
@@ -1080,6 +1113,13 @@ async function cmdRepair(featureId) {
         runResult = await runWithBudget(repairPrompt, rWallet);
     }
     catch (err) {
+        contract = {
+            ...contract,
+            activeFeatureId: null,
+            features: contract.features.map((f) => f.id === featureId ? { ...f, status: feature.status } : f),
+            updatedAt: new Date().toISOString(),
+        };
+        await saveContract(contract);
         console.error(`Error running bob repair: ${err.message}`);
         exit(1);
     }
@@ -1270,6 +1310,10 @@ async function cmdInstall(args) {
     }
     const hasGlobal = args.includes("--global");
     const hasProject = args.includes("--project");
+    if (hasGlobal && hasProject) {
+        console.error(`Error: choose exactly one install scope: --global or --project`);
+        exit(1);
+    }
     // Default: project scope (safer — doesn't touch user home dir without flag)
     const scope = hasGlobal ? "global" : "project";
     if (!hasGlobal && !hasProject) {

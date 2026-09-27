@@ -168,8 +168,11 @@ export function bobMaxCost(
 export function repairWallet(
   contract: ShipContract
 ): number | null {
-  const repairReserve = contract.reserves.repair;
-  const safe = repairReserve - contract.overshootGuard;
+  const available = Math.min(
+    contract.reserves.repair,
+    Math.max(0, windowRemaining(contract.currentWindow))
+  );
+  const safe = available - contract.overshootGuard;
   if (safe <= 0) return null;
   return safe;
 }
@@ -207,6 +210,19 @@ export function resolveAssignedBudget(
   capped: boolean;
   providerRemainingAtStart: number | null;
 } {
+  if (
+    providerRemaining !== null &&
+    (!Number.isFinite(providerRemaining) || providerRemaining <= 0)
+  ) {
+    throw new Error("providerRemaining must be a positive finite number");
+  }
+  if (
+    userBudget !== null &&
+    (!Number.isFinite(userBudget) || userBudget <= 0)
+  ) {
+    throw new Error("userBudget must be a positive finite number");
+  }
+
   if (userBudget === null) {
     // auto mode
     if (providerRemaining === null) {
@@ -306,6 +322,12 @@ export function nextProjectState(
   contract: ShipContract,
   risk: RiskState
 ): ProjectState {
+  // LAND is an explicit one-way finishing decision within a compute window.
+  // Validation and repair may update risk, but must never reopen feature work.
+  if (contract.state === "LAND" || contract.state === "SHIPPED") {
+    return contract.state;
+  }
+
   const hasPending = contract.features.some(
     (f) =>
       f.status === "pending" ||
@@ -341,6 +363,9 @@ export function recordSpend(
   actualSpend: number,
   interrupted: boolean
 ): ShipContract {
+  if (!Number.isFinite(actualSpend) || actualSpend < 0) {
+    throw new Error("actualSpend must be a non-negative finite number");
+  }
   // Update window spend
   const updatedWindow: ComputeWindow = {
     ...contract.currentWindow,
@@ -394,6 +419,9 @@ export function recordRepairSpend(
   actualSpend: number,
   interrupted: boolean
 ): ShipContract {
+  if (!Number.isFinite(actualSpend) || actualSpend < 0) {
+    throw new Error("actualSpend must be a non-negative finite number");
+  }
   // Deduct from the repair reserve
   const newRepairReserve = Math.max(0, contract.reserves.repair - actualSpend);
   const updatedReserves: typeof contract.reserves = {
@@ -587,6 +615,9 @@ export function openNewWindow(
   providerRemainingAtStart: number | null,
   budgetMode: BudgetMode
 ): ShipContract {
+  if (!Number.isFinite(assignedBudget) || assignedBudget <= 0) {
+    throw new Error("assignedBudget must be a positive finite number");
+  }
   const closedWindow: ComputeWindow = {
     ...contract.currentWindow,
     closedAt: new Date().toISOString(),

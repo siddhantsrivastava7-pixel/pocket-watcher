@@ -60,7 +60,6 @@ Use CLI commands for:
 | BUILD    | Executing features within budget |
 | COMPRESS | Over budget — must cut scope before continuing |
 | LAND     | Minimal remaining — ship what exists, no new scope |
-| SHIPPED  | Done |
 
 ## Risk levels
 
@@ -90,11 +89,13 @@ LAND allows:
 2. If remaining usage is unknown, ask once: "How many Bobcoins do you have remaining?"
 3. Run `pocket init --budget <n>` with the assigned budget
 4. Run `pocket scope "<request>"` to decompose and estimate features
-5. If scope does not fit, present deferred features and ask which matter most
-6. For each feature: `pocket run <id>` → `pocket validate <id>`
-7. After each run, show updated budget and risk from `pocket status`
-8. If COMPRESS: help user decide what to defer
-9. If LAND: run `pocket check` and report final working feature set
+5. Before execution, ensure trusted, portable validation commands are configured
+   in `.pocket/ship-contract.json`; `pocket scope` does not generate shell commands
+6. If scope does not fit, present deferred features and ask which matter most
+7. For each feature: `pocket run <id>` → `pocket validate <id>`
+8. After each run, show updated budget and risk from `pocket status`
+9. If COMPRESS: help user decide what to defer
+10. If LAND: run `pocket check` and report final working feature set
 
 ## Example opening
 
